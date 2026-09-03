@@ -1,5 +1,5 @@
 services:
-  project-python:
+  python:
     build: .
     volumes:
       - .:/CS4010
@@ -7,13 +7,13 @@ services:
     stdin_open: true # Lets us use the container terminal interactively
     environment:
       - MONGO_URI=${MONGO_SERVER}
-      - KAFKA_BOOTSTRAP_SERVERS=project-kafka:9094
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9094
       - SPARK_MASTER_URL=spark://spark-master:7077 
     depends_on:
-      - project-kafka
+      - kafka
       - spark-master
 
-  project-kafka:
+  kafka:
     image: apache/kafka:4.3.1
     ports:
       - "9094:9092"
@@ -21,9 +21,9 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller #Combined mode, rather than running e.g. 3 brokers and 3 controllers.
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://project-kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT #Unencrypted, plaintext. It is local for now.
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@project-kafka:9093 #Kafka votes for itself, as there is only one container with Kafka.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 #Kafka votes for itself, as there is only one container with Kafka.
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER #listener that's listening in 9093
 
       #Only one. Kafka expects data to be replicated on several servers (in cloud) for security and availability (CAP), but we are not using that here.
