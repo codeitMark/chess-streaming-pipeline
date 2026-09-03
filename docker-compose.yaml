@@ -42,8 +42,8 @@ services:
     ports:
       - "27017:27017"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER} # For those using mongodb locally, please make sure to include these variables in your .env file, as well as a local link (in MONGO_URI).
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin} # For those using mongodb locally, please make sure to include these variables in your .env file, as well as a local link (in MONGO_URI).
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-supersecretpassword123} # Dummy values for if you don't have those variables (prevents crash)
     volumes:
       - mongodb_data:/data/db
 
