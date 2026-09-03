@@ -1,4 +1,6 @@
-FROM python:3.10.21-alpine3.24
+FROM python:3.14
+
+# With kafka-python-ng (new-gen), it supports python 3.12+
 
 # Installing JDK for PySpark.
 # procps necessary for PySpark monitoring. rm-rf is in best practices in the Docker Docs.
