@@ -1,0 +1,72 @@
+services:
+  project-python:
+    build: .
+    volumes:
+      - .:/CS4010
+    tty: true # Keeps container alive on standby     
+    stdin_open: true # Lets us use the container terminal interactively
+    environment:
+      - MONGO_URI=${MONGO_SERVER}
+      - KAFKA_BOOTSTRAP_SERVERS=project-kafka:9094
+      - SPARK_MASTER_URL=spark://spark-master:7077 
+    depends_on:
+      - kafka
+      - spark-master
+
+  project-kafka:
+    image: apache/kafka:latest
+    container_name: project_kafka
+    networks:
+      - bigdata-network
+    ports:
+      - "9094:9092" # Access port for your local desktop Python Producer scripts
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFICES_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REREPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+  spark-master:
+    image: apache/spark:latest
+    ports:
+      - "7077:7077"
+      - "8080:8080" # Web Dashboard (http://localhost:8080)
+    environment:
+      - SPARK_MODE=master
+
+  spark-worker:
+    image: apache/spark:latest
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g 
+    deploy:
+      replicas: 2
+
+  pyspark:
+    image: apache/spark:latest
+    container_name: bigdata_pyspark
+    depends_on:
+      - kafka
+    env_file:
+      - .env  # Injects your cloud MongoDB Atlas connection strings safely
+    volumes:
+      - .:/opt/spark/apps # Links your desktop code folder inside Spark
+    # THE REQUIREMENT FIX: Forces this container to pip install your libraries on boot!
+    command: >
+      bash -c "pip install kafka-python pymongo requests && tail -f /dev/null"
+    networks:
+      - bigdata-network
