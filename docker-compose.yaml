@@ -62,8 +62,8 @@ services:
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_CORES=1 #1 CPU Core
-      - SPARK_WORKER_MEMORY=1g #1 GB Ram
+      - SPARK_WORKER_CORES=2 #2 CPU Cores
+      - SPARK_WORKER_MEMORY=4g #4 GB Ram
     deploy:
       replicas: 2
 
