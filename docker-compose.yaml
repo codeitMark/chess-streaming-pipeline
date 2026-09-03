@@ -12,11 +12,14 @@ services:
     depends_on:
       - kafka
       - spark-master
+      - mongodb
 
   kafka:
     image: apache/kafka:4.3.1
     ports:
       - "9094:9092"
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller #Combined mode, rather than running e.g. 3 brokers and 3 controllers.
@@ -34,7 +37,15 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0 # Will not need this when running locally. Default is good for a lot of machines running microservices on different servers.
       KAFKA_NUM_PARTITIONS: 3 # Load balancing for workers, let's them split the work. 3 for scalability, and not 2. e.g. worker 1 takes 1 and 3, while worker 2 takes 2. If we need more workers, the load balancing ends up better depending on the partitions. More is not always better too, only a little more than the available workers.
 
-      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER} # For those using mongodb locally, please make sure to include these variables in your .env file, as well as a local link (in MONGO_URI).
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS}
+    volumes:
+      - mongodb_data:/data/db
 
   spark-master:
     image: apache/spark:4.2.0
@@ -55,3 +66,7 @@ services:
       - SPARK_WORKER_MEMORY=1g #1 GB Ram
     deploy:
       replicas: 2
+
+volumes:
+  kafka_data:
+  mongodb_data:
