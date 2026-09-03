@@ -15,26 +15,26 @@ services:
 
   project-kafka:
     image: apache/kafka:latest
-    container_name: project_kafka
-    networks:
-      - bigdata-network
     ports:
-      - "9094:9092" # Access port for your local desktop Python Producer scripts
+      - "9094:9092"
     environment:
       KAFKA_NODE_ID: 1
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
-      KAFKA_OFFICES_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_PROCESS_ROLES: broker,controller #Combined mode, rather than running e.g. 3 brokers and 3 controllers.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://project-kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT #Unencrypted, plaintext. It is local for now.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@project-kafka:9093 #Kafka votes for itself, as there is only one container with Kafka.
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER #listener that's listening in 9093
+
+      #Only one. Kafka expects data to be replicated on several servers (in cloud) for security and availability (CAP), but we are not using that here.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REREPLICATION_FACTOR: 1
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
-      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0 # Will not need this when running locally. Default is good for a lot of machines running microservices on different servers.
+      KAFKA_NUM_PARTITIONS: 3 # Load balancing for workers, let's them split the work. 3 for scalability, and not 2. e.g. worker 1 takes 1 and 3, while worker 2 takes 2. If we need more workers, the load balancing ends up better depending on the partitions. More is not always better too, only a little more than the available workers.
+
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
 
   spark-master:
     image: apache/spark:latest
@@ -51,22 +51,7 @@ services:
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_CORES=2
-      - SPARK_WORKER_MEMORY=2g 
+      - SPARK_WORKER_CORES=1 #1 CPU Core
+      - SPARK_WORKER_MEMORY=1g #1 GB Ram
     deploy:
       replicas: 2
-
-  pyspark:
-    image: apache/spark:latest
-    container_name: bigdata_pyspark
-    depends_on:
-      - kafka
-    env_file:
-      - .env  # Injects your cloud MongoDB Atlas connection strings safely
-    volumes:
-      - .:/opt/spark/apps # Links your desktop code folder inside Spark
-    # THE REQUIREMENT FIX: Forces this container to pip install your libraries on boot!
-    command: >
-      bash -c "pip install kafka-python pymongo requests && tail -f /dev/null"
-    networks:
-      - bigdata-network
