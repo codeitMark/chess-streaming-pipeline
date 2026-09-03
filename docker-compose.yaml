@@ -10,11 +10,11 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=project-kafka:9094
       - SPARK_MASTER_URL=spark://spark-master:7077 
     depends_on:
-      - kafka
+      - project-kafka
       - spark-master
 
   project-kafka:
-    image: apache/kafka:latest
+    image: apache/kafka:4.3.1
     ports:
       - "9094:9092"
     environment:
@@ -37,7 +37,7 @@ services:
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
 
   spark-master:
-    image: apache/spark:latest
+    image: apache/spark:4.2.0
     ports:
       - "7077:7077"
       - "8080:8080" # Web Dashboard (http://localhost:8080)
@@ -45,7 +45,7 @@ services:
       - SPARK_MODE=master
 
   spark-worker:
-    image: apache/spark:latest
+    image: apache/spark:4.2.0
     depends_on:
       - spark-master
     environment:
