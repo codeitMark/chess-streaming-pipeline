@@ -38,7 +38,7 @@ services:
       KAFKA_NUM_PARTITIONS: 3 # Load balancing for workers, let's them split the work. 3 for scalability, and not 2. e.g. worker 1 takes 1 and 3, while worker 2 takes 2. If we need more workers, the load balancing ends up better depending on the partitions. More is not always better too, only a little more than the available workers.
 
   mongodb:
-    image: mongo:latest
+    image: mongo:8.0.29 # Latest stable release (long term). Always specify version numnber, latest can break this
     ports:
       - "27017:27017"
     environment:
