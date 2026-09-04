@@ -1,0 +1,72 @@
+services:
+  python:
+    build: .
+    volumes:
+      - .:/CS4010
+    tty: true # Keeps container alive on standby     
+    stdin_open: true # Lets us use the container terminal interactively
+    environment:
+      - MONGO_URI=${MONGO_SERVER}
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9094
+      - SPARK_MASTER_URL=spark://spark-master:7077 
+    depends_on:
+      - kafka
+      - spark-master
+      - mongodb
+
+  kafka:
+    image: apache/kafka:4.3.1
+    ports:
+      - "9094:9092"
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller #Combined mode, rather than running e.g. 3 brokers and 3 controllers.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT #Unencrypted, plaintext. It is local for now.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 #Kafka votes for itself, as there is only one container with Kafka.
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER #listener that's listening in 9093
+
+      #Only one. Kafka expects data to be replicated on several servers (in cloud) for security and availability (CAP), but we are not using that here.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0 # Will not need this when running locally. Default is good for a lot of machines running microservices on different servers.
+      KAFKA_NUM_PARTITIONS: 3 # Load balancing for workers, let's them split the work. 3 for scalability, and not 2. e.g. worker 1 takes 1 and 3, while worker 2 takes 2. If we need more workers, the load balancing ends up better depending on the partitions. More is not always better too, only a little more than the available workers.
+
+  mongodb:
+    image: mongo:8.0.29 # Latest stable release (long term). Always specify version numnber, latest can break this
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin} # For those using mongodb locally, please make sure to include these variables in your .env file, as well as a local link (in MONGO_URI).
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-supersecretpassword123} # Dummy values for if you don't have those variables (prevents crash)
+    volumes:
+      - mongodb_data:/data/db
+
+  spark-master:
+    image: apache/spark:4.2.0
+    ports:
+      - "7077:7077"
+      - "8080:8080" # Web Dashboard (http://localhost:8080)
+    environment:
+      - SPARK_MODE=master
+
+  spark-worker:
+    image: apache/spark:4.2.0
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2 #2 CPU Cores
+      - SPARK_WORKER_MEMORY=4g #4 GB Ram
+    deploy:
+      replicas: 2
+
+volumes:
+  kafka_data:
+  mongodb_data:
