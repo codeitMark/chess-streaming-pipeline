@@ -28,6 +28,8 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT #Unencrypted, plaintext. It is local for now.
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 #Kafka votes for itself, as there is only one container with Kafka.
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER #listener that's listening in 9093
+      
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL # Addressing error for kafka in docker, as KAFKA_INTER_BROKER_LISTENER_NAME is looking for PLAINTEXT rather than INTERNAL
 
       #Only one. Kafka expects data to be replicated on several servers (in cloud) for security and availability (CAP), but we are not using that here.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
