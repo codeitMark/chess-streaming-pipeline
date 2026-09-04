@@ -20,7 +20,7 @@ WORKDIR /CS4010
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Step 5: Copy application files
+# Copy application files
 COPY . .
 
 # Ensures Python outputs output instantly to the terminal
