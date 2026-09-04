@@ -9,6 +9,11 @@ RUN apt-get update && apt-get install -y \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
+# Installing stockfish for saulochess
+RUN apt-get update && apt-get install -y \
+    stockfish \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /CS4010
 
 # --no-cache-dir is also part of best practice (Docker Docs). Reduces image size. 
