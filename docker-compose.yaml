@@ -1,6 +1,8 @@
 services:
   python:
     build: .
+    env_file:
+      - .env
     volumes:
       - .:/CS4010
     tty: true # Keeps container alive on standby     
@@ -22,16 +24,16 @@ services:
       - kafka_data:/tmp/kraft-combined-logs
     environment:
       KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller #Combined mode, rather than running e.g. 3 brokers and 3 controllers.
+      KAFKA_PROCESS_ROLES: broker,controller # Combined mode, rather than running e.g. 3 brokers and 3 controllers.
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT #Unencrypted, plaintext. It is local for now.
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 #Kafka votes for itself, as there is only one container with Kafka.
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER #listener that's listening in 9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT # Unencrypted, plaintext. It is local for now.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 # Kafka votes for itself, as there is only one container with Kafka.
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER # listener that's listening in 9093
       
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL # Addressing error for kafka in docker, as KAFKA_INTER_BROKER_LISTENER_NAME is looking for PLAINTEXT rather than INTERNAL
 
-      #Only one. Kafka expects data to be replicated on several servers (in cloud) for security and availability (CAP), but we are not using that here.
+      # Only one. Kafka expects data to be replicated on several servers (in cloud) for security and availability (CAP), but we are not using that here.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -51,19 +53,20 @@ services:
 
   spark-master:
     image: apache/spark:4.2.0
+    command: /opt/spark/sbin/start-master.sh
     ports:
       - "7077:7077"
       - "8080:8080" # Web Dashboard (http://localhost:8080)
     environment:
-      - SPARK_MODE=master
+      - SPARK_NO_DAEMONIZE=true # Prevents the container from exiting (keeps it running on docker). Refer to Spark's github "spark.env.sh.template"
 
   spark-worker:
     image: apache/spark:4.2.0
+    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
     depends_on:
       - spark-master
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_NO_DAEMONIZE=true
       - SPARK_WORKER_CORES=2 #2 CPU Cores
       - SPARK_WORKER_MEMORY=4g #4 GB Ram
     deploy:
@@ -72,3 +75,5 @@ services:
 volumes:
   kafka_data:
   mongodb_data:
+
+# SPARK_MODE and SPARK_MASTER_URL is not for apache/spark, but rather bitnami/spark SPARK_MASTER_URL is rather directly in "command" for apache/spark.
