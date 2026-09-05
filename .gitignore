@@ -219,3 +219,6 @@ __marimo__/
 
 # Probe and collector reports -- generated, never committed
 ingestion/out/
+
+# Claude Code local session state
+.claude
