@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Probe and collector reports -- generated, never committed
+ingestion/out/
