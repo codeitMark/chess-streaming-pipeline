@@ -66,7 +66,7 @@ services:
       - SPARK_NO_DAEMONIZE=true # Prevents the container from exiting (keeps it running on docker). Refer to Spark's github "spark.env.sh.template"
       - SPARK_HOME=/opt/spark
       - SPARK_SUBMIT_OPTS=-Divy.home=/tmp/.ivy2
-      - MONGO_URI=${MONGO_SERVER}
+      - MONGO_URI=${MONGO_URI}
 
   spark-worker:
     image: apache/spark:4.2.0
