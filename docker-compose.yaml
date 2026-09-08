@@ -13,6 +13,7 @@ services:
       # advertises "localhost:9094", and localhost in here is this container.
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - SPARK_MASTER_URL=spark://spark-master:7077
+      - PYTHONPATH=/CS4010
     depends_on:
       - kafka
       - spark-master

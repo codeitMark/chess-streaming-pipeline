@@ -1,112 +1,59 @@
-"""Stage 1a -- player collection.
-
-Two requests per player, no game archives. Produces one message per player
-carrying profile and stats together, which the consumer writes as a single
-document. Game collection is a separate process (collect_games.py) because its
-cost per player is wildly uneven and would otherwise stall this loop.
-
-    python ingestion/collect_players.py --countries NO,IS,DK --players 200
-"""
-
-from __future__ import annotations
-
-import argparse
+#!/usr/bin/env python3
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from ingestion.common import BASE, TOPIC_PLAYERS, envelope, make_fetcher, make_producer
 
-from ingestion.common import (  # noqa: E402
-    BASE,
-    Fetcher,
-    build_session,
-    contact_address,
-    envelope,
-    make_sink,
-)
-from processing.schema import TOPIC_PLAYERS  # noqa: E402
+BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+DELAY = 1.0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Collect daily player snapshots.")
-    parser.add_argument("--countries", default="NO")
-    parser.add_argument(
-        "--players", type=int, default=100,
-        help="Players per country. The roster endpoint caps at 10000 and ignores "
-             "every pagination parameter, so that is the hard ceiling.",
-    )
-    parser.add_argument(
-        "--offset", type=int, default=0,
-        help="Skip this many usernames in each roster. The roster is alphabetical "
-             "and stable, so offsets let you cover it across several runs.",
-    )
-    parser.add_argument("--delay", type=float, default=1.0)
-    parser.add_argument("--contact", default=None)
-    parser.add_argument("--target", choices=("kafka", "file"), default="file")
-    parser.add_argument(
-        "--bootstrap",
-        default=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094"),
-        help="Defaults to $KAFKA_BOOTSTRAP_SERVERS. Inside compose that is "
-             "kafka:9092; from the host it is localhost:9094.",
-    )
-    parser.add_argument("--out", default=None)
-    args = parser.parse_args()
+    raw = sys.argv[1] if len(sys.argv) > 1 else "NO"
+    countries = [c.strip().upper() for c in raw.split(",") if c.strip()]
+    players = int(sys.argv[2]) if len(sys.argv) > 2 else 100
 
     run_id = uuid.uuid4().hex[:12]
-    started = datetime.now(timezone.utc)
-    out_dir = Path(
-        args.out or Path(__file__).parent / "out" / f"players_{started:%Y%m%dT%H%M%SZ}"
-    )
+    fetcher = make_fetcher(DELAY)
+    producer = make_producer(BOOTSTRAP)
 
-    fetcher = Fetcher(build_session(contact_address(args.contact)), args.delay, run_id)
-    sink = make_sink(args.target, args.bootstrap, out_dir)
-    countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
-
-    print(f"run {run_id} -> {args.target} | {countries} | {args.players} each\n")
+    print(f"run {run_id} | {countries} | {players} each\n")
 
     emitted = 0
     for iso in countries:
+        # One request gives the whole country roster.
         listing = fetcher.get(f"{BASE}/country/{iso}/players")
         if not listing:
             print(f"[{iso}] roster unavailable")
             continue
 
-        roster = listing.get("players", [])
-        window = roster[args.offset : args.offset + args.players]
-        print(f"[{iso}] roster {len(roster)}, taking {len(window)} from {args.offset}")
+        window = listing.get("players", [])[:players]
+        print(f"[{iso}] taking {len(window)} players")
 
-        for i, username in enumerate(window, 1):
+        for username in window:
+            # Two requests per player: profile, then stats.
             profile = fetcher.get(f"{BASE}/player/{username}")
             if not profile:
                 continue
             stats = fetcher.get(f"{BASE}/player/{username}/stats") or {}
 
-            # One message carries both halves so the consumer can build the
-            # player document and its dated snapshot in a single transaction.
-            sink.send(
+            # One message per player, so the consumer writes one document.
+            producer.send(
                 TOPIC_PLAYERS,
-                username,
-                envelope(
+                key=username,
+                value=envelope(
                     run_id,
                     f"{BASE}/player/{username}",
                     {"profile": profile, "stats": stats, "country_hint": iso},
                 ),
             )
             emitted += 1
-            if i % 25 == 0:
-                print(f"  {i}/{len(window)}")
 
-    sink.close()
-    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-    print(
-        f"\n{emitted} players | {fetcher.requests_made} requests "
-        f"({fetcher.not_modified} x 304) | {fetcher.raw_bytes:,} B | {elapsed/60:.1f} min"
-    )
-    if args.target == "file":
-        print(f"written to {out_dir}")
+    producer.flush()
+    producer.close()
+    print(f"\n{emitted} players sent | {fetcher.requests_made} requests "
+          f"| {fetcher.raw_bytes:,} B")
     return 0
 
 
