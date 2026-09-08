@@ -8,9 +8,12 @@ services:
     tty: true # Keeps container alive on standby     
     stdin_open: true # Lets us use the container terminal interactively
     environment:
-      - MONGO_URI=${MONGO_SERVER}
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9094
-      - SPARK_MASTER_URL=spark://spark-master:7077 
+      # MONGO_URI comes from .env (Atlas during development), so it is not
+      # redefined here. Kafka must be the INTERNAL listener: the EXTERNAL one
+      # advertises "localhost:9094", and localhost in here is this container.
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - PYTHONPATH=/CS4010
     depends_on:
       - kafka
       - spark-master
@@ -19,7 +22,10 @@ services:
   kafka:
     image: apache/kafka:4.3.1
     ports:
-      - "9094:9092"
+      # Host 9094 has to reach the EXTERNAL listener on container 9094. This was
+      # 9094:9092, which reached INTERNAL instead and handed host clients back an
+      # unresolvable "kafka:9092".
+      - "9094:9094"
     volumes:
       - kafka_data:/tmp/kraft-combined-logs
     environment:
