@@ -1,0 +1,90 @@
+{
+  "1": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "2": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "3": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "4": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "5": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "6": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "7": {
+    "side": "White",
+    "rank": "Bad"
+  },
+  "8": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "9": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "10": {
+    "side": "Black",
+    "rank": "Blunder"
+  },
+  "11": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "12": {
+    "side": "Black",
+    "rank": "Bad"
+  },
+  "13": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "14": {
+    "side": "Black",
+    "rank": "Bad"
+  },
+  "15": {
+    "side": "White",
+    "rank": "Bad"
+  },
+  "16": {
+    "side": "Black",
+    "rank": "Bad"
+  },
+  "17": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "18": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "19": {
+    "side": "White",
+    "rank": "Blunder"
+  },
+  "20": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "21": {
+    "side": "White",
+    "rank": "Blunder"
+  },
+  "22": {
+    "side": "Black",
+    "rank": "Good"
+  }
+}

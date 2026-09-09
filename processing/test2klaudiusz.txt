@@ -1,0 +1,273 @@
+"""Classify chess moves with chess.com-style labels, using Stockfish.
+
+Labels: Book, Brilliant, Great, Best, Excellent, Good, Inaccuracy, Mistake,
+Blunder. Chess.com's exact system is proprietary and runs on its own engine and
+depth, so treat this as a close approximation, not a reproduction.
+
+Book detection needs the CC0 Lichess openings tables:
+    for f in a b c d e; do
+      curl -sSLO https://raw.githubusercontent.com/lichess-org/chess-openings/master/$f.tsv
+    done
+Without them the Book label is simply never emitted.
+"""
+
+from __future__ import annotations
+
+import glob
+import io
+import json
+import math
+import shutil
+
+import chess
+import chess.engine
+import chess.pgn
+
+STOCKFISH_PATH = shutil.which("stockfish") or "/usr/games/stockfish"
+
+DEFAULT_DEPTH = 20
+
+# Evals are clamped before conversion so forced mates and lopsided material do
+# not dominate the arithmetic: +12 and mate-in-2 are both simply "winning".
+EVAL_CLAMP = 1200
+WIN_PERCENT_K = 0.00368208  # logistic fit from centipawns to expected score
+
+# Thresholds in win-percentage points, not centipawns. A centipawn threshold
+# treats losing 1.5 pawns while up a queen as seriously as losing 1.5 pawns in
+# a level game; this does not.
+EXCELLENT_MAX = 2.0
+GOOD_MAX = 10.0
+INACCURACY_MAX = 15.0
+MISTAKE_MAX = 25.0
+
+# "Great" is the engine's move when the second-best move is much worse, i.e.
+# the position had one answer and you found it. Needs MultiPV >= 2.
+GREAT_MARGIN = 12.0
+
+# Brilliant heuristic.
+SAC_HORIZON = 10          # plies of engine PV walked so exchanges resolve
+SAC_WINDOW = 4            # trailing plies that must all still show a deficit
+MIN_SACRIFICE = 150       # centipawns given up; raise to 300 for pieces only
+MAX_LEAD_BEFORE = 200     # not brilliant if already materially winning
+SOUND_WIN_PERCENT = 50.0  # the sacrifice has to leave you at least equal
+
+PIECE_VALUES = {
+    chess.PAWN: 100,
+    chess.KNIGHT: 320,
+    chess.BISHOP: 330,
+    chess.ROOK: 500,
+    chess.QUEEN: 900,
+}
+
+movetext = "e4 {[%clk 0:03:01.2]} 1... e5 {[%clk 0:03:00.4]} 2. Nf3 {[%clk 0:03:02.2]} 2... Nc6 {[%clk 0:02:58.8]} 3. Nc3 {[%clk 0:03:02.7]} 3... Nf6 {[%clk 0:02:58.6]} 4. Nxe5 {[%clk 0:03:03.2]} 4... Nxe5 {[%clk 0:02:58.4]} 5. d4 {[%clk 0:03:04.8]} 5... Nc4 {[%clk 0:02:55.3]} 6. Bxc4 {[%clk 0:03:03.2]} 6... Qe7 {[%clk 0:02:43.2]} 7. e5 {[%clk 0:02:59.1]} 7... Ng4 {[%clk 0:02:23.9]} 8. Qxg4 {[%clk 0:02:57.7]} 8... c6 {[%clk 0:02:14.1]} 9. O-O {[%clk 0:02:38.7]} 9... d5 {[%clk 0:01:43.4]} 10. Re1 {[%clk 0:02:25.6]} 10... Bxg4 {[%clk 0:01:39.2]} 11. Bg5 {[%clk 0:02:21.5]} 11... Qxg5 {[%clk 0:01:35.1]} 0-1"
+
+
+def load_opening_book(pattern: str = "openings_*.tsv") -> set[str]:
+    """Build the set of positions that appear in a named opening line."""
+    positions: set[str] = set()
+    for path in sorted(glob.glob(pattern)):
+        with open(path, encoding="utf-8") as handle:
+            next(handle, None)
+            for row in handle:
+                columns = row.rstrip("\n").split("\t")
+                if len(columns) < 3:
+                    continue
+                line = chess.pgn.read_game(io.StringIO(columns[2]))
+                if line is None:
+                    continue
+                board = line.board()
+                for move in line.mainline_moves():
+                    board.push(move)
+                    positions.add(board.epd())
+    return positions
+
+
+def _material_balance(board: chess.Board, color: chess.Color) -> int:
+    """Material in centipawns from one player's perspective."""
+    own = sum(
+        len(board.pieces(piece_type, color)) * value
+        for piece_type, value in PIECE_VALUES.items()
+    )
+    opponent = sum(
+        len(board.pieces(piece_type, not color)) * value
+        for piece_type, value in PIECE_VALUES.items()
+    )
+    return own - opponent
+
+
+def _win_percent(score: chess.engine.PovScore, color: chess.Color) -> float:
+    """Convert a Stockfish score into a 0-100 chance of winning for `color`."""
+    centipawns = score.pov(color).score(mate_score=100_000)
+    centipawns = max(-EVAL_CLAMP, min(EVAL_CLAMP, centipawns))
+    return 100.0 / (1.0 + math.exp(-WIN_PERCENT_K * centipawns))
+
+
+def _sacrificed_material(
+    board: chess.Board,
+    principal_variation: list[chess.Move],
+    material_before: int,
+    color: chess.Color,
+) -> int:
+    """Material still missing once the engine's line has played itself out.
+
+    `board` is the position after the move being judged. A sacrifice loses
+    material at once and stays down; a trade wins it straight back, and a pawn
+    that drops off eight plies into a quiet line was never sacrificed at all.
+    Requiring both an immediate and a lasting deficit rejects both cases.
+    """
+    balances: list[int] = []
+    for reply in principal_variation[:SAC_HORIZON]:
+        if not board.is_legal(reply):
+            break
+        board.push(reply)
+        balances.append(_material_balance(board, color))
+        if board.is_game_over():
+            break
+
+    for _ in balances:
+        board.pop()
+
+    if not balances:
+        return 0
+    immediate = material_before - min(balances[:2])
+    lasting = material_before - max(balances[-SAC_WINDOW:])
+    return max(0, min(immediate, lasting))
+
+
+def _rank_move(
+    loss: float,
+    is_book: bool,
+    is_top_move: bool,
+    second_best_gap: float,
+    sacrificed: int,
+    lead_before: int,
+    win_percent_after: float,
+) -> str:
+    """Pick the label, most specific first."""
+    # Opening tables include dubious gambits, so a move only stays "Book" while
+    # it is also not an error: 4.Nxe5 is theory (Halloween Gambit) and a mistake.
+    if is_book and loss <= GOOD_MAX:
+        return "Book"
+    if (
+        loss <= EXCELLENT_MAX
+        and sacrificed >= MIN_SACRIFICE
+        and lead_before <= MAX_LEAD_BEFORE
+        and win_percent_after >= SOUND_WIN_PERCENT
+    ):
+        return "Brilliant"
+    if is_top_move and second_best_gap >= GREAT_MARGIN:
+        return "Great"
+    if is_top_move:
+        return "Best"
+    if loss <= EXCELLENT_MAX:
+        return "Excellent"
+    if loss <= GOOD_MAX:
+        return "Good"
+    if loss <= INACCURACY_MAX:
+        return "Inaccuracy"
+    if loss <= MISTAKE_MAX:
+        return "Mistake"
+    return "Blunder"
+
+
+def analyze_chess_game(
+    game_text: str = movetext,
+    output_path: str = "move_ranks.json",
+    depth: int = DEFAULT_DEPTH,
+    book: set[str] | None = None,
+    detailed: bool = False,
+) -> dict[str, dict[str, str]]:
+    """Analyse every ply and save its side and rank keyed by ply number."""
+    game = chess.pgn.read_game(io.StringIO(game_text))
+    if game is None:
+        raise ValueError("Variable game_text does not contain a valid game moves")
+
+    book = book if book is not None else set()
+    moves = list(game.mainline_moves())
+    board = game.board()
+    move_ranks: dict[str, dict[str, str]] = {}
+
+    with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+        limit = chess.engine.Limit(depth=depth)
+
+        # Pass 1: one MultiPV search per position. The position a move reaches
+        # is the one the next move starts from, so searching each position once
+        # covers both roles. The second line is what separates Great from Best.
+        searched = []
+        for move in moves:
+            lines = engine.analyse(board, limit, multipv=2)
+            searched.append(lines)
+            board.push(move)
+        searched.append(engine.analyse(board, limit, multipv=2))
+        for _ in moves:
+            board.pop()
+
+        for ply_number, move in enumerate(moves, start=1):
+            color = board.turn
+            lead_before = _material_balance(board, color)
+            before = searched[ply_number - 1]
+            after = searched[ply_number]
+
+            best_move = before[0]["pv"][0] if before[0].get("pv") else None
+            is_top_move = best_move is not None and move == best_move
+            gap = 0.0
+            if len(before) > 1:
+                gap = _win_percent(before[0]["score"], color) - _win_percent(
+                    before[1]["score"], color
+                )
+
+            # Both sides of the comparison are searched to the same depth from
+            # the same distance, so the engine's own choice always scores 0.
+            win_percent_played = _win_percent(after[0]["score"], color)
+            if is_top_move or best_move is None:
+                win_percent_best = win_percent_played
+            else:
+                board.push(best_move)
+                win_percent_best = _win_percent(
+                    engine.analyse(board, limit)["score"], color
+                )
+                board.pop()
+            loss = max(0.0, win_percent_best - win_percent_played)
+
+            san = board.san(move)
+            board.push(move)
+            sacrificed = _sacrificed_material(
+                board, list(after[0].get("pv", [])), lead_before, color
+            )
+
+            entry = {
+                "side": "White" if color == chess.WHITE else "Black",
+                "rank": _rank_move(
+                    loss,
+                    board.epd() in book,
+                    is_top_move,
+                    gap,
+                    sacrificed,
+                    lead_before,
+                    win_percent_played,
+                ),
+            }
+            if detailed:
+                entry |= {
+                    "move": san,
+                    "loss": round(loss, 1),
+                    "win_percent": round(win_percent_played, 1),
+                    "second_best_gap": round(gap, 1),
+                    "sacrificed": sacrificed,
+                }
+            move_ranks[str(ply_number)] = entry
+
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        json.dump(move_ranks, output_file, indent=2)
+        output_file.write("\n")
+
+    return move_ranks
+
+
+if __name__ == "__main__":
+    opening_book = load_opening_book()
+    print(f"Opening book: {len(opening_book)} positions\n")
+    analysis_data = analyze_chess_game(book=opening_book, detailed=True)
+
+    print("--- MOVE CLASSIFICATIONS OUTPUT ---")
+    print(json.dumps(analysis_data, indent=2, default=str))

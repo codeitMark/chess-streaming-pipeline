@@ -1,0 +1,114 @@
+import io
+import json
+import shutil
+import chess
+import chess.engine
+import chess.pgn
+
+# 1. TELL PYTHON WHERE THE INSTALLED STOCKFISH PROGRAM LIVES
+# shutil.which("stockfish") searches the system PATH automatically.
+# If not found, it defaults to the Debian Linux location: /usr/games/stockfish
+STOCKFISH_PATH = shutil.which("stockfish") or "/usr/games/stockfish"
+
+DEFAULT_DEPTH = 20
+MOVE_RANKS = ("Brilliant", "Good", "Bad", "Blunder")
+
+# 2. YOUR RAW GAME MOVES FROM CHESS.COM
+movetext = "e4 {[%clk 0:03:01.2]} 1... e5 {[%clk 0:03:00.4]} 2. Nf3 {[%clk 0:03:02.2]} 2... Nc6 {[%clk 0:02:58.8]} 3. Nc3 {[%clk 0:03:02.7]} 3... Nf6 {[%clk 0:02:58.6]} 4. Nxe5 {[%clk 0:03:03.2]} 4... Nxe5 {[%clk 0:02:58.4]} 5. d4 {[%clk 0:03:04.8]} 5... Nc4 {[%clk 0:02:55.3]} 6. Bxc4 {[%clk 0:03:03.2]} 6... Qe7 {[%clk 0:02:43.2]} 7. e5 {[%clk 0:02:59.1]} 7... Ng4 {[%clk 0:02:23.9]} 8. Qxg4 {[%clk 0:02:57.7]} 8... c6 {[%clk 0:02:14.1]} 9. O-O {[%clk 0:02:38.7]} 9... d5 {[%clk 0:01:43.4]} 10. Re1 {[%clk 0:02:25.6]} 10... Bxg4 {[%clk 0:01:39.2]} 11. Bg5 {[%clk 0:02:21.5]} 11... Qxg5 {[%clk 0:01:35.1]} 0-1"
+
+
+def _material_balance(board: chess.Board, color: chess.Color) -> int:
+    """Return material in centipawns from one player's perspective."""
+    values = {
+        chess.PAWN: 100,
+        chess.KNIGHT: 320,
+        chess.BISHOP: 330,
+        chess.ROOK: 500,
+        chess.QUEEN: 900,
+    }
+    own = sum(
+        len(board.pieces(piece_type, color)) * value
+        for piece_type, value in values.items()
+    )
+    opponent = sum(
+        len(board.pieces(piece_type, not color)) * value
+        for piece_type, value in values.items()
+    )
+    return own - opponent
+
+
+def _evaluation(score: chess.engine.PovScore, color: chess.Color) -> int:
+    """Convert a Stockfish score to centipawns from the moving side's view."""
+    return score.pov(color).score(mate_score=100_000) or 0
+
+
+def _rank_move(
+    best_loss: int,
+    material_loss: int,
+) -> str:
+    """Classify a move using centipawn loss and a small Brilliant heuristic."""
+    if material_loss >= 100 and best_loss <= 20:
+        return "Brilliant"
+    if best_loss <= 20:
+        return "Good"
+    if best_loss <= 150:
+        return "Bad"
+    return "Blunder"
+
+
+def analyze_chess_game(
+    game_text: str = movetext,
+    output_path: str = "move_ranks.json",
+    depth: int = DEFAULT_DEPTH,
+) -> dict[str, dict[str, str]]:
+    """Analyze every ply and save its side and rank keyed by ply number."""
+    game = chess.pgn.read_game(io.StringIO(game_text))
+    if game is None:
+        raise ValueError("Variable game_text does not contain a valid game moves")
+
+    board = game.board()
+    move_ranks: dict[str, dict[str, str]] = {}
+
+    with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+        for ply_number, move in enumerate(game.mainline_moves(), start=1):
+            color = board.turn
+            before_material = _material_balance(board, color)
+            before = engine.analyse(board, chess.engine.Limit(depth=depth))
+            best_score = _evaluation(before["score"], color)
+
+            board.push(move)
+            after = engine.analyse(board, chess.engine.Limit(depth=depth))
+            played_score = _evaluation(after["score"], color)
+
+            move_loss = max(0, best_score - played_score)
+            material_loss = 0
+            opponent_reply = after.get("pv", [None])[0]
+            if opponent_reply is not None and not board.is_game_over():
+                board.push(opponent_reply)
+                material_loss = max(
+                    0,
+                    before_material - _material_balance(board, color),
+                )
+                board.pop()
+
+            move_ranks[str(ply_number)] = {
+                "side": "White" if color == chess.WHITE else "Black",
+                "rank": _rank_move(
+                    move_loss,
+                    material_loss,
+                ),
+            }
+
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        json.dump(move_ranks, output_file, indent=2)
+        output_file.write("\n")
+
+    return move_ranks
+
+if __name__ == "__main__":
+    print("Starting Stockfish analysis inside Docker...\n")
+    analysis_data = analyze_chess_game()
+
+    # Print the move classifications formatted clearly
+    print("--- MOVE CLASSIFICATIONS OUTPUT ---")
+    print(json.dumps(analysis_data, indent=2, default=str))
