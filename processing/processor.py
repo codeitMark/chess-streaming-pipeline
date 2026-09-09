@@ -6,9 +6,14 @@ from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import StructType
 from pyspark.sql import Row
 from pyspark.sql.functions import col, current_timestamp, from_json, coalesce, lit, when, to_date, date_format, explode, size, element_at, reverse, transform
-from processing.schemas import PLAYER_SCHEMA, envelope_schema
+from processing.schemas import PLAYER_SCHEMA, MULTI_GAME_SCHEMA, envelope_schema
 from ingestion.common import TOPIC_PLAYERS, TOPIC_GAMES, mongo_db
 from pymongo import UpdateOne
+
+import io
+import re
+import chess.pgn
+from pyspark.sql.functions import udf
 
 #To run use 'docker compose exec python spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0 --master spark://spark-master:7077 /CS4010/processing/processor.py'
 
@@ -38,11 +43,11 @@ def create_spark_session() -> SparkSession:
     return spark
 
 # Using streaming, as we will be using real-time streaming. I do not see a point in using batch processing when we are upserting and not using historical data (which we would need to populate or backfill)
-def read_player_stream(spark: SparkSession) -> DataFrame:
+def read_stream(spark: SparkSession, const_topic) -> DataFrame:
     return (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", BOOTSTRAP)
-        .option("subscribe", TOPIC_PLAYERS)
+        .option("subscribe", const_topic)
         .option("startingOffsets", "earliest")
         .option("failOnDataLoss", "false")
         .load()
@@ -95,7 +100,7 @@ def parse_df(kafka_df: DataFrame, schema: StructType, enveloped: bool = True) ->
 def process_player_data() -> StreamingQuery:
     spark = create_spark_session()
 
-    kafka_df = read_player_stream(spark)
+    kafka_df = read_stream(spark, TOPIC_PLAYERS)
 
     parsed_df = parse_df(kafka_df, PLAYER_SCHEMA)
 
@@ -144,6 +149,104 @@ def process_player_data() -> StreamingQuery:
         .start()
     )
 
+def clock_to_seconds(clk_str):
+    if not clk_str:
+        return None
+    parts = clk_str.split(":")
+    if len(parts) == 3:
+        return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2]) # hours
+    elif len(parts) == 2:
+        return float(parts[0]) * 60 + float(parts[1]) # minutes
+    return float(parts[0]) # only seconds
+
+# PGN Parser UDF. Spark does not support PGN through DataFrames. Need to explode it twice (games and moves). It will store each move in it's own document with metadata to identify the game. Makes fetching/filtering in MongoDB and analysis easier (e.g. "find all blunders under 5 seconds")
+@udf(returnType=MULTI_GAME_SCHEMA)
+def parse_df_pgn(raw_pgn_str):
+    if not raw_pgn_str:
+        return []
+
+    pgn_io = io.StringIO(raw_pgn_str) #pgnn.read_game() expects a stream, not raw string. therefore needs this to be trasnformed.
+    parsed_games = []
+    clk = re.compile(r"\[%clk\s+([\d:\.]+)\]") # extracts the time with regex. returns a string with only the time and not [, ], and %clk
+
+    # Loop through all games in the PGN string
+    while True:
+        game = chess.pgn.read_game(pgn_io)
+        if game is None:
+            break  # No (more) games
+
+        headers = game.headers
+        
+        # Determine starting base time control for move 1 time_spent calculation
+        tc_str = headers.get("TimeControl", "180") # Checks the time in the game, 180 is set as default (e.g. 3 min blitz).
+        base_tc = float(tc_str.split("+")[0]) if tc_str.split("+")[0].isdigit() else 180.0 # base time control (for cases with e.g. 180+2 (180 secs with +2 sec increments))
+
+        parsed_moves = []
+        board = game.board()
+        prev_clocks = {"white": base_tc, "black": base_tc} # stores most recent clock readings, necessary for calculating time spent during each move.
+
+        # goes through every move (node) in the game. ply is every (half) move, e.g. move 2 for black and white is ply 3 and 4.
+        for node in game.mainline():
+            ply = node.ply()
+            move_num = (ply + 1) // 2
+            
+            # Determine player who played THIS node
+            player = "white" if board.turn == chess.WHITE else "black"
+            move_san = board.san(node.move) # Converts raw coordinates to standard notation (e.g. Nf3)
+            
+            # node.comment is what's inside {}, e.g. [00:00:00.0], which we extract by using regex clk
+            match = clk.search(node.comment)
+
+            # Initialized early with None in case there is missing data (e.g. no time control)
+            remaining_sec = None
+            time_spent_sec = None
+            
+            if match:
+                remaining_sec = clock_to_seconds(match.group(1)) # match.group(1) returns only the time, while group(0) returns the entire string ([%clk 00:00:00.0])
+                if prev_clocks[player] is not None:
+                    time_spent_sec = max(0.0, round(prev_clocks[player] - remaining_sec, 2))
+                prev_clocks[player] = remaining_sec
+
+            parsed_moves.append({
+                "move_san": move_san,
+                "remaining_clock_sec": remaining_sec,
+                "ply": ply,
+                "move_number": move_num,
+                "player": player,
+                "time_spent_sec": time_spent_sec
+            })
+
+            # Next (half) move
+            board.push(node.move)
+
+        # Some games (e.g. friendly matches) may not display any elo.
+        parsed_games.append({
+            "event": headers.get("Event"),
+            "game_link": headers.get("Link"),
+            "utc_date": headers.get("UTCDate"),
+            "utc_time": headers.get("UTCTime"),
+            "white": headers.get("White"),
+            "black": headers.get("Black"),
+            "white_elo": int(headers["WhiteElo"]) if headers.get("WhiteElo", "").isdigit() else None,
+            "black_elo": int(headers["BlackElo"]) if headers.get("BlackElo", "").isdigit() else None,
+            "time_control": headers.get("TimeControl"),
+            "result": headers.get("Result"),
+            "termination": headers.get("Termination"),
+            "eco": headers.get("ECO"),
+            "eco_url": headers.get("ECOUrl"),
+            "moves": parsed_moves
+        })
+
+    return parsed_games
+
+def process_game_data() -> StreamingQuery:
+    spark = create_spark_session()
+
+    kafka_df = read_stream(spark, TOPIC_GAMES)
+
+    df_pgn = kafka_df.select(col("value").cast("string").alias("raw_pgn"))
+
+    parsed_df = df_pgn.withColumn("games", parse_df_pgn(col("raw_pgn"))) # games is a column that holds all the pulled games. 
 
 def main() -> None:
     streaming_query = process_player_data()
