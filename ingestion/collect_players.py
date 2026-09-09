@@ -3,7 +3,7 @@ import os
 import sys
 import uuid
 
-from common import BASE, TOPIC_PLAYERS, envelope, make_fetcher, make_producer
+from ingestion.common import BASE, TOPIC_PLAYERS, envelope, make_fetcher, make_producer
 
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
 DELAY = 1.0
