@@ -13,6 +13,7 @@ services:
       # advertises "localhost:9094", and localhost in here is this container.
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - SPARK_MASTER_URL=spark://spark-master:7077
+      - PYTHONPATH=/CS4010 # so imports work
     depends_on:
       - kafka
       - spark-master
@@ -28,6 +29,7 @@ services:
     volumes:
       - kafka_data:/tmp/kraft-combined-logs
     environment:
+      CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw" # Added so data persists through builds
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller # Combined mode, rather than running e.g. 3 brokers and 3 controllers.
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
@@ -66,7 +68,8 @@ services:
       - SPARK_NO_DAEMONIZE=true # Prevents the container from exiting (keeps it running on docker). Refer to Spark's github "spark.env.sh.template"
       - SPARK_HOME=/opt/spark
       - SPARK_SUBMIT_OPTS=-Divy.home=/tmp/.ivy2
-      - MONGO_URI=${MONGO_URI}
+    volumes:
+     - .:/CS4010 # Added because I'm using spark-master for running processor.py.
 
   spark-worker:
     image: apache/spark:4.2.0
