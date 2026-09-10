@@ -25,7 +25,7 @@
   },
   "7": {
     "side": "White",
-    "rank": "Bad"
+    "rank": "Good"
   },
   "8": {
     "side": "Black",
@@ -37,7 +37,7 @@
   },
   "10": {
     "side": "Black",
-    "rank": "Blunder"
+    "rank": "Good"
   },
   "11": {
     "side": "White",
@@ -45,23 +45,23 @@
   },
   "12": {
     "side": "Black",
-    "rank": "Bad"
+    "rank": "Good"
   },
   "13": {
     "side": "White",
-    "rank": "Good"
+    "rank": "Bad"
   },
   "14": {
     "side": "Black",
-    "rank": "Bad"
+    "rank": "Good"
   },
   "15": {
     "side": "White",
-    "rank": "Bad"
+    "rank": "Good"
   },
   "16": {
     "side": "Black",
-    "rank": "Bad"
+    "rank": "Blunder"
   },
   "17": {
     "side": "White",
@@ -73,7 +73,7 @@
   },
   "19": {
     "side": "White",
-    "rank": "Blunder"
+    "rank": "Good"
   },
   "20": {
     "side": "Black",
@@ -81,9 +81,193 @@
   },
   "21": {
     "side": "White",
-    "rank": "Blunder"
+    "rank": "Good"
   },
   "22": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "23": {
+    "side": "White",
+    "rank": "Bad"
+  },
+  "24": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "25": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "26": {
+    "side": "Black",
+    "rank": "Bad"
+  },
+  "27": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "28": {
+    "side": "Black",
+    "rank": "Bad"
+  },
+  "29": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "30": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "31": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "32": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "33": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "34": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "35": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "36": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "37": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "38": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "39": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "40": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "41": {
+    "side": "White",
+    "rank": "Bad"
+  },
+  "42": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "43": {
+    "side": "White",
+    "rank": "Brilliant"
+  },
+  "44": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "45": {
+    "side": "White",
+    "rank": "Blunder"
+  },
+  "46": {
+    "side": "Black",
+    "rank": "Blunder"
+  },
+  "47": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "48": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "49": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "50": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "51": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "52": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "53": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "54": {
+    "side": "Black",
+    "rank": "Blunder"
+  },
+  "55": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "56": {
+    "side": "Black",
+    "rank": "Bad"
+  },
+  "57": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "58": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "59": {
+    "side": "White",
+    "rank": "Blunder"
+  },
+  "60": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "61": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "62": {
+    "side": "Black",
+    "rank": "Blunder"
+  },
+  "63": {
+    "side": "White",
+    "rank": "Blunder"
+  },
+  "64": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "65": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "66": {
+    "side": "Black",
+    "rank": "Good"
+  },
+  "67": {
+    "side": "White",
+    "rank": "Good"
+  },
+  "68": {
     "side": "Black",
     "rank": "Good"
   }

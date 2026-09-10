@@ -10,11 +10,15 @@ import chess.pgn
 # If not found, it defaults to the Debian Linux location: /usr/games/stockfish
 STOCKFISH_PATH = shutil.which("stockfish") or "/usr/games/stockfish"
 
-DEFAULT_DEPTH = 20
+DEFAULT_DEPTH = 17
 MOVE_RANKS = ("Brilliant", "Good", "Bad", "Blunder")
+GOOD_MAX_LOSS = 100
+BLUNDER_MIN_LOSS = 400
+BRILLIANT_MAX_LOSS = 30
+BRILLIANT_MIN_SACRIFICE = 500
 
 # 2. YOUR RAW GAME MOVES FROM CHESS.COM
-movetext = "e4 {[%clk 0:03:01.2]} 1... e5 {[%clk 0:03:00.4]} 2. Nf3 {[%clk 0:03:02.2]} 2... Nc6 {[%clk 0:02:58.8]} 3. Nc3 {[%clk 0:03:02.7]} 3... Nf6 {[%clk 0:02:58.6]} 4. Nxe5 {[%clk 0:03:03.2]} 4... Nxe5 {[%clk 0:02:58.4]} 5. d4 {[%clk 0:03:04.8]} 5... Nc4 {[%clk 0:02:55.3]} 6. Bxc4 {[%clk 0:03:03.2]} 6... Qe7 {[%clk 0:02:43.2]} 7. e5 {[%clk 0:02:59.1]} 7... Ng4 {[%clk 0:02:23.9]} 8. Qxg4 {[%clk 0:02:57.7]} 8... c6 {[%clk 0:02:14.1]} 9. O-O {[%clk 0:02:38.7]} 9... d5 {[%clk 0:01:43.4]} 10. Re1 {[%clk 0:02:25.6]} 10... Bxg4 {[%clk 0:01:39.2]} 11. Bg5 {[%clk 0:02:21.5]} 11... Qxg5 {[%clk 0:01:35.1]} 0-1"
+movetext ="1. e4 {[%clk 0:03:01.2]} 1... e5 {[%clk 0:03:00.4]} 2. Nf3 {[%clk 0:03:02.2]} 2... Nc6 {[%clk 0:02:58.8]} 3. Nc3 {[%clk 0:03:02.7]} 3... Nf6 {[%clk 0:02:58.6]} 4. Nxe5 {[%clk 0:03:03.2]} 4... Nxe5 {[%clk 0:02:58.4]} 5. d4 {[%clk 0:03:04.8]} 5... Nc4 {[%clk 0:02:55.3]} 6. Bxc4 {[%clk 0:03:03.2]} 6... Qe7 {[%clk 0:02:43.2]} 7. e5 {[%clk 0:02:59.1]} 7... Ng4 {[%clk 0:02:23.9]} 8. Qxg4 {[%clk 0:02:57.7]} 8... c6 {[%clk 0:02:14.1]} 9. O-O {[%clk 0:02:38.7]} 9... d5 {[%clk 0:01:43.4]} 10. Re1 {[%clk 0:02:25.6]} 10... Bxg4 {[%clk 0:01:39.2]} 11. Bg5 {[%clk 0:02:21.5]} 11... Qxg5 {[%clk 0:01:35.1]} 0-1"
 
 
 def _material_balance(board: chess.Board, color: chess.Color) -> int:
@@ -46,12 +50,14 @@ def _rank_move(
     best_loss: int,
     material_loss: int,
 ) -> str:
-    """Classify a move using centipawn loss and a small Brilliant heuristic."""
-    if material_loss >= 100 and best_loss <= 20:
+    """Classify a move using centipawn loss and a sacrifice heuristic."""
+    # A Brilliant move must be a sound sacrifice of at least a minor piece.
+    if (material_loss >= BRILLIANT_MIN_SACRIFICE
+            and best_loss <= BRILLIANT_MAX_LOSS):
         return "Brilliant"
-    if best_loss <= 20:
+    if best_loss <= GOOD_MAX_LOSS:
         return "Good"
-    if best_loss <= 150:
+    if best_loss < BLUNDER_MIN_LOSS:
         return "Bad"
     return "Blunder"
 
