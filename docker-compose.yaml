@@ -51,7 +51,7 @@ services:
   mongodb:
     image: mongo:8.0.29 # Latest stable release (long term). Always specify version numnber, latest can break this
     ports:
-      - "27019:27017" # Changing this because my personal ports are occupied...
+      - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin} # For those using mongodb locally, please make sure to include these variables in your .env file, as well as a local link (in MONGO_URI).
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-supersecretpassword123} # Dummy values for if you don't have those variables (prevents crash)
@@ -59,7 +59,9 @@ services:
       - mongodb_data:/data/db
 
   spark-master:
-    image: apache/spark:4.2.0
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
     command: /opt/spark/sbin/start-master.sh
     ports:
       - "7077:7077"
@@ -68,11 +70,15 @@ services:
       - SPARK_NO_DAEMONIZE=true # Prevents the container from exiting (keeps it running on docker). Refer to Spark's github "spark.env.sh.template"
       - SPARK_HOME=/opt/spark
       - SPARK_SUBMIT_OPTS=-Divy.home=/tmp/.ivy2
+      - PYSPARK_PYTHON=/usr/bin/python3.14
+      - PYSPARK_DRIVER_PYTHON=/usr/bin/python3.14
     volumes:
      - .:/CS4010 # Added because I'm using spark-master for running processor.py.
 
   spark-worker:
-    image: apache/spark:4.2.0
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
     command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
     depends_on:
       spark-master:
@@ -82,6 +88,7 @@ services:
       - SPARK_NO_DAEMONIZE=true
       - SPARK_WORKER_CORES=2 #2 CPU Cores
       - SPARK_WORKER_MEMORY=4g #4 GB Ram
+      - PYSPARK_PYTHON=/usr/bin/python3.14
     deploy:
       replicas: 2
 
