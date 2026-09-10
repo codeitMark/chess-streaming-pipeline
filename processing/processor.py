@@ -266,7 +266,7 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
             col("moves")
         )
 
-        # Explode g.moves, then do another select. Need to list the parent columns to make sure we keep them for writing to MongoDB.
+        # Do another select and explode moves. Need to list the parent columns to make sure we keep them for writing to MongoDB.
         .select(
             explode(col("moves")).alias("m"),
             # Creates MongoDB Primary Key (_id). The game data doesn't have it's own ID, and MongoDB needs an _id to act as its primary key so it can update the right data and avoid duplicates (idedmpotency)
@@ -281,6 +281,7 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
             col("m.player").alias("player"),
             col("m.time_spent_sec").alias("time_spent_sec")
         )
+        .drop("m") # drops m, since we have exploded it and already gotten all the data out of it.
     )
 
     games_writer = partial(
