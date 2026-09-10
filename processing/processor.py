@@ -1,19 +1,17 @@
 import os
+import io
+import re
 import argparse
+import chess.pgn
 from functools import partial
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import StructType
 from pyspark.sql import Row
-from pyspark.sql.functions import col, current_timestamp, from_json, coalesce, lit, when, to_date, date_format, explode, size, element_at, reverse, transform
+from pyspark.sql.functions import col, concat_ws, from_json, coalesce, lit, explode, udf
 from processing.schemas import PLAYER_SCHEMA, MULTI_GAME_SCHEMA, envelope_schema
 from ingestion.common import TOPIC_PLAYERS, TOPIC_GAMES, mongo_db
 from pymongo import UpdateOne
-
-import io
-import re
-import chess.pgn
-from pyspark.sql.functions import udf
 
 #To run use 'docker compose exec python spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0 --master spark://spark-master:7077 /CS4010/processing/processor.py'
 
@@ -97,9 +95,7 @@ def parse_df(kafka_df: DataFrame, schema: StructType, enveloped: bool = True) ->
 
     return kafka_df.select(from_json(json_column, schema).alias("data")).select("data.*")
 
-def process_player_data() -> StreamingQuery:
-    spark = create_spark_session()
-
+def process_player_data(spark: SparkSession) -> StreamingQuery:
     kafka_df = read_stream(spark, TOPIC_PLAYERS)
 
     parsed_df = parse_df(kafka_df, PLAYER_SCHEMA)
@@ -159,11 +155,11 @@ def clock_to_seconds(clk_str):
         return float(parts[0]) * 60 + float(parts[1]) # minutes
     return float(parts[0]) # only seconds
 
-# PGN Parser UDF. Spark does not support PGN through DataFrames. Need to explode it twice (games and moves). It will store each move in it's own document with metadata to identify the game. Makes fetching/filtering in MongoDB and analysis easier (e.g. "find all blunders under 5 seconds")
+# PGN Parser UDF. Spark does not support PGN through DataFrames.
 @udf(returnType=MULTI_GAME_SCHEMA)
 def parse_df_pgn(raw_pgn_str):
     if not raw_pgn_str:
-        return []
+        return {"games": []}
 
     pgn_io = io.StringIO(raw_pgn_str) #pgnn.read_game() expects a stream, not raw string. therefore needs this to be trasnformed.
     parsed_games = []
@@ -237,20 +233,69 @@ def parse_df_pgn(raw_pgn_str):
             "moves": parsed_moves
         })
 
-    return parsed_games
+    return {"games": parsed_games}
 
-def process_game_data() -> StreamingQuery:
-    spark = create_spark_session()
-
+def process_game_data(spark: SparkSession) -> StreamingQuery:
     kafka_df = read_stream(spark, TOPIC_GAMES)
 
     df_pgn = kafka_df.select(col("value").cast("string").alias("raw_pgn"))
 
-    parsed_df = df_pgn.withColumn("games", parse_df_pgn(col("raw_pgn"))) # games is a column that holds all the pulled games. 
+    parsed_df = df_pgn.withColumn("parsed_data", parse_df_pgn(col("raw_pgn"))) # games is a column that holds all the pulled games. 
+
+    # Need to explode it twice (games and moves). It will store each move in it's own document with metadata to identify the game. Makes fetching/filtering in MongoDB and analysis easier (e.g. "find all blunders under 5 seconds")
+    df_games = parsed_df.select(explode(col("parsed_data.games")).alias("games")) # games is packed in a struct when col expects an array, so must enter the array through games.games.
+
+    df_flattened_games = df_games.select("games.*")
+
+    df_moves = (
+        df_flattened_games.select(
+            # Have to unfortunately rename everything to get rid of games. prefix due to the explosion.
+            col("event"),
+            col("game_link"),
+            col("utc_date"),
+            col("utc_time"),
+            col("white"),
+            col("black"),
+            col("white_elo"),
+            col("black_elo"),
+            col("time_control"),
+            col("result"),
+            col("termination"),
+            col("eco"),
+            col("eco_url"),
+            col("moves")
+        )
+
+        # Explode g.moves, then do another select. Need to list the parent columns to make sure we keep them for writing to MongoDB.
+        .select(
+            explode(col("moves")).alias("m"),
+            # Creates MongoDB Primary Key (_id). The game data doesn't have it's own ID, and MongoDB needs an _id to act as its primary key so it can update the right data and avoid duplicates (idedmpotency)
+            concat_ws("_", col("game_link"), col("m.ply")), # there is only one ply for each game link. Need _ as a seperator (e.g. game 1, move 23 = game1_23 and game 12, move 3 = game 12_3)
+
+            "event", "game_link", "utc_date", "utc_time", "white", "black", "white_elo", "black_elo", "time_control", "result", "termination", "eco", "eco_url",
+
+            col("m.move_san").alias("move_san"),
+            col("m.remaining_clock_sec").alias("remaining_clock_sec"),
+            col("m.ply").alias("ply"),
+            col("m.move_number").alias("move_number"),
+            col("m.player").alias("player"),
+            col("m.time_spent_sec").alias("time_spent_sec")
+        )
+    )
+
+    return df_moves
 
 def main() -> None:
-    streaming_query = process_player_data()
-    streaming_query.awaitTermination() # since .start() is asynchronous (for streaming real-time), we need to awaitTermination for it to finish processing all the data and writing it to MongoDB before exiting the python process.
+    spark = create_spark_session()
+    queries = [process_player_data(spark), process_game_data(spark)]
+    try:
+        spark.streams.awaitAnyTermination() # since .start() is asynchronous (for streaming real-time), we need to awaitTermination for it to finish processing all the data and writing it to MongoDB before exiting the python process.
+    except Exception as e:
+        print(f"Stream failed {e}")
+
+        for q in queries:
+            if q.isActive:
+                q.stop()
 
 
 if __name__ == "__main__":
