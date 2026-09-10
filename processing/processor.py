@@ -243,7 +243,7 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
     parsed_df = df_pgn.withColumn("parsed_data", parse_df_pgn(col("raw_pgn"))) # games is a column that holds all the pulled games. 
 
     # Need to explode it twice (games and moves). It will store each move in it's own document with metadata to identify the game. Makes fetching/filtering in MongoDB and analysis easier (e.g. "find all blunders under 5 seconds")
-    games_df = parsed_df.select(explode(col("parsed_data.games")).alias("games")) # games is packed in a struct when col expects an array, so must enter the array through games.games.
+    games_df = parsed_df.select(explode(col("parsed_data.games")).alias("games")) # games is packed in a struct when col expects an array, so must enter the array through parsed_data.games.
 
     flattened_games_df = games_df.select("games.*")
 
@@ -295,6 +295,55 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
         .foreachBatch(games_writer) # this is where both batch_df and batch_id come in. These are automatically supplied by Spark.
         .outputMode("append")
         .option("checkpointLocation", "/tmp/chess-games-checkpoint")
+        .start()
+    )
+
+def evaluate_partition(iterator):
+    for row in iterator:
+        row_dict = row.asDict()
+        
+        # Access the single game data
+        pgn_string = row_dict["game"]["moves"] 
+        
+        # Pass the raw PGN string of the single game to your teammate's function
+        #evaluation_result = stockfish_processing(pgn_string)
+        
+        # Yield the output to be collected into a new DataFrame (Uses this as a schema, we end up with the PGN string and evaluation_result)
+        yield Row(
+            pgn=pgn_string  #,
+            #evaluation=evaluation_result
+        )
+
+def process_micro_batch(batch_df, batch_id):
+    eval_rdd = batch_df.rdd.mapPartitions(evaluate_partition)
+
+    eval_df = batch_df.sparkSession.createDataFrame(eval_rdd)
+
+    eval_df.write \
+        .format("mongodb") \
+        .mode("append") \
+        .option("collection", "chess_evaluations") \
+        .save()
+
+def evaluate_game_data(spark: SparkSession):
+    kafka_df = read_stream(spark, TOPIC_GAMES)
+
+    df_pgn = kafka_df.select(col("value").cast("string").alias("raw_pgn"))
+
+    parsed_df = df_pgn.withColumn("parsed_data", parse_df_pgn(col("raw_pgn")))
+
+    single_games_df = parsed_df.select(explode(col("games")).alias("game"))
+
+    eval_games_writer = partial(
+        write_to_mongodb,
+        collection_name="evaluated_chess_games",
+        id_path=("_id",) # Requires a tuple, so sending it as a tuple.
+    )
+
+    return (
+        single_games_df.writeStream
+        .foreachBatch(process_micro_batch)
+        .option("checkpointLocation", "/tmp/eval-chess-games-checkpoint")
         .start()
     )
 
