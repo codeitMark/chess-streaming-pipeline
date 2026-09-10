@@ -243,12 +243,12 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
     parsed_df = df_pgn.withColumn("parsed_data", parse_df_pgn(col("raw_pgn"))) # games is a column that holds all the pulled games. 
 
     # Need to explode it twice (games and moves). It will store each move in it's own document with metadata to identify the game. Makes fetching/filtering in MongoDB and analysis easier (e.g. "find all blunders under 5 seconds")
-    df_games = parsed_df.select(explode(col("parsed_data.games")).alias("games")) # games is packed in a struct when col expects an array, so must enter the array through games.games.
+    games_df = parsed_df.select(explode(col("parsed_data.games")).alias("games")) # games is packed in a struct when col expects an array, so must enter the array through games.games.
 
-    df_flattened_games = df_games.select("games.*")
+    flattened_games_df = games_df.select("games.*")
 
-    df_moves = (
-        df_flattened_games.select(
+    moves_df = (
+        flattened_games_df.select(
             # Have to unfortunately rename everything to get rid of games. prefix due to the explosion.
             col("event"),
             col("game_link"),
@@ -270,7 +270,7 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
         .select(
             explode(col("moves")).alias("m"),
             # Creates MongoDB Primary Key (_id). The game data doesn't have it's own ID, and MongoDB needs an _id to act as its primary key so it can update the right data and avoid duplicates (idedmpotency)
-            concat_ws("_", col("game_link"), col("m.ply")), # there is only one ply for each game link. Need _ as a seperator (e.g. game 1, move 23 = game1_23 and game 12, move 3 = game 12_3)
+            concat_ws("_", col("game_link"), col("m.ply")).alias("_id"), # there is only one ply for each game link. Need _ as a seperator (e.g. game 1, move 23 = game1_23 and game 12, move 3 = game 12_3)
 
             "event", "game_link", "utc_date", "utc_time", "white", "black", "white_elo", "black_elo", "time_control", "result", "termination", "eco", "eco_url",
 
@@ -283,7 +283,19 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
         )
     )
 
-    return df_moves
+    games_writer = partial(
+        write_to_mongodb,
+        collection_name="chess_games",
+        id_path=("_id",) # Requires a tuple, so sending it as a tuple.
+    )
+
+    return (
+        moves_df.writeStream
+        .foreachBatch(games_writer) # this is where both batch_df and batch_id come in. These are automatically supplied by Spark.
+        .outputMode("append")
+        .option("checkpointLocation", "/tmp/chess-games-checkpoint")
+        .start()
+    )
 
 def main() -> None:
     spark = create_spark_session()
