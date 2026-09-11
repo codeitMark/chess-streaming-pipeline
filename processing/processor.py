@@ -8,7 +8,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import StructType
 from pyspark.sql import Row
-from pyspark.sql.functions import col, concat_ws, from_json, coalesce, lit, explode, udf
+from pyspark.sql.functions import col, concat_ws, from_json, coalesce, lit, explode, udf, from_unixtime, element_at, split, date_format
 from processing.schemas import PLAYER_SCHEMA, PAYLOAD_SCHEMA, PGN_GAME_SCHEMA, envelope_schema
 from ingestion.common import TOPIC_PLAYERS, TOPIC_GAMES, mongo_db
 from pymongo import UpdateOne
@@ -130,15 +130,52 @@ def process_player_data(spark: SparkSession) -> StreamingQuery:
         sum(mode_totals.values()).cast("long")
     )
 
+    flattened_df = processed_df.select(
+        col("profile.player_id").alias("_id"),
+        col("profile.username").alias("username"),
+        col("profile.title").alias("title"),
+        col("profile.status").alias("status"),
+        date_format(from_unixtime(col("profile.joined")), "yyyy-MM-dd").alias("joined_date"),  # Uses from_unixtime to convert the raw seconds to an actual date.
+        element_at(split(col("profile.country"), "/"), -1).alias("country_code"), # Takes only the country_code (which is the last part of the link)
+        col("profile.is_streamer").alias("is_streamer"),
+        col("fetched_at"),
+
+        col("total_games_played"),
+        col("total_games_played_blitz"),
+        col("total_games_played_rapid"),
+        col("total_games_played_bullet"),
+
+        col("stats.chess_blitz.last.rating").alias("blitz_rating_current"),
+        col("stats.chess_blitz.best.rating").alias("blitz_rating_best"),
+        date_format(from_unixtime(col("stats.chess_blitz.best.date")), "yyyy-MM-dd").alias("blitz_peak_date"),
+        col("stats.chess_blitz.record.win").alias("blitz_wins"),
+        col("stats.chess_blitz.record.loss").alias("blitz_losses"),
+        col("stats.chess_blitz.record.draw").alias("blitz_draws"),
+
+        col("stats.chess_rapid.last.rating").alias("rapid_rating_current"),
+        col("stats.chess_rapid.best.rating").alias("rapid_rating_best"),
+        date_format(from_unixtime(col("stats.chess_rapid.best.date")), "yyyy-MM-dd").alias("rapid_peak_date"),
+        col("stats.chess_rapid.record.win").alias("rapid_wins"),
+        col("stats.chess_rapid.record.loss").alias("rapid_losses"),
+        col("stats.chess_rapid.record.draw").alias("rapid_draws"),
+
+        col("stats.chess_bullet.last.rating").alias("bullet_rating_current"),
+        col("stats.chess_bullet.best.rating").alias("bullet_rating_best"),
+        date_format(from_unixtime(col("stats.chess_bullet.best.date")), "yyyy-MM-dd").alias("bullet_peak_date"),
+        col("stats.chess_bullet.record.win").alias("bullet_wins"),
+        col("stats.chess_bullet.record.loss").alias("bullet_losses"),
+        col("stats.chess_bullet.record.draw").alias("bullet_draws")
+    )
+
     # partial because we don't have anything for the batch_id parameter
     player_writer = partial(
         write_to_mongodb,
         collection_name="chess_players",
-        id_path=("profile", "player_id") # uses player_id as MongoDB's _id.
+        id_path=("_id",)
     )
 
     return (
-        processed_df.writeStream
+        flattened_df.writeStream
         .foreachBatch(player_writer) #uses both batch_df and batch_id
         .outputMode("append")
         .option("checkpointLocation", "/tmp/chess-player-checkpoint")

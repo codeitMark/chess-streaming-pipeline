@@ -21,58 +21,58 @@ def get_month_from_url(url: str) -> str:
 
 
 def select_players(db: Any, country: str | None, limit: int) -> list[dict]:
-    """Selects players evenly across rating bands without phantom flags."""
-    match: dict[str, Any] = {}
-    if country:
-        country_code = country.upper().strip()
-
-        country_regex = re.compile(rf"(?:/|^){country_code}$", re.IGNORECASE)
-        match["$or"] = [
-            {"country": country_regex},
-            {"profile.country": country_regex}
+    """Selects players evenly across rating bands who need game collection."""
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m") # If players haven't been fetched for the current month. strftime to format it to YYYY-mm
+    unprocessed_filter = {
+        "$or": [
+            {"games_through": {"$exists": False}},
+            {"games_through": {"$ne": current_month}}
         ]
+    }
+
+    country_filter = {} # country_filter if specified in argument
+    if country:
+        country_filter = {"country_code": country.upper().strip()}
 
     per_band = max(1, limit // len(RATING_BANDS))
     picked: list[dict] = []
     seen_ids: set[Any] = set()
 
+    # Fetches players evenly across rating bands
     for low, high in RATING_BANDS:
         if len(picked) >= limit:
             break
 
         quota = min(per_band, limit - len(picked))
+
+        rating_query = {"blitz_rating_current": {"$gte": low, "$lt": high}}
         
-    # Check both flat rating fields and nested API paths
-        rating_query = {
-            "$or": [
-                {"blitz_rating": {"$gte": low, "$lt": high}},
-                {"blitz.rating": {"$gte": low, "$lt": high}},
-                {"stats.chess_blitz.last.rating": {"$gte": low, "$lt": high}}
-            ]
-        }
-        
-        # Combine country match (if present) with rating bounds
-        if "$or" in match:
-            full_query = {"$and": [match, rating_query]}
-        else:
-            full_query = {**match, **rating_query}
+        conditions = [unprocessed_filter, rating_query]
+        if country_filter:
+            conditions.append(country_filter)
+
+        full_query = {"$and": conditions}
         
         for player in db[PLAYERS].find(full_query).limit(quota):
             picked.append(player)
             seen_ids.add(player["_id"])
 
-    # Fallback to remaining players sorted by last_online if limit is not reached
+    # 4. If rating bands didn't fill the total limit, fill with other players.
     shortfall = limit - len(picked)
     if shortfall > 0:
-        if "$or" in match:
-            fallback_query = {"$and": [match, {"_id": {"$nin": list(seen_ids)}}]}
-        else:
-            fallback_query = {**match, "_id": {"$nin": list(seen_ids)}}
+        fallback_conditions = [
+            unprocessed_filter,
+            {"_id": {"$nin": list(seen_ids)}} # excludes already picked players
+        ]
+        if country_filter:
+            fallback_conditions.append(country_filter)
+
+        fallback_query = {"$and": fallback_conditions}
             
         fallback_players = (
             db[PLAYERS]
             .find(fallback_query)
-            .sort("last_online", -1)
+            .sort("fetched_at", -1)  # Most recently ingested players are added first to fill the list (regardless of rating)
             .limit(shortfall)
         )
         picked.extend(fallback_players)
@@ -110,7 +110,7 @@ def main() -> int:
     games_sent = 0
 
     for i, player in enumerate(players, 1):
-        username = player.get("profile", {}).get("username") or player.get("username") or player.get("_id")
+        username = player.get("username") or player.get("_id")
         
         # Pull player archive index
         res = fetcher.get(f"{BASE}/player/{username}/games/archives") or {}
@@ -136,9 +136,10 @@ def main() -> int:
 
         # Track progress checkpoint back to Mongo
         if months:
+            current_month = datetime.now(timezone.utc).strftime("%Y-%m")
             db[PLAYERS].update_one(
                 {"_id": player["_id"]}, 
-                {"$set": {"games_through": get_month_from_url(months[-1])}}
+                {"$set": {"games_through": current_month}} # changed to current_month instead of actual month the last game is from. This is to avoid it being added to the potential pull pool because they didnt play for the current month.
             )
         
         print(f"  {i:>4}/{len(players)} | Player: {username:<20} | Processed Months: {len(months):>2}")
