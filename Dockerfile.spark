@@ -1,0 +1,41 @@
+# Required to build spark-workers, as well as update inner versions to python 3.14 (same as the python container.) This became necessary due to the processing of PGN, which uses UDF.
+FROM apache/spark:4.2.0
+
+USER root
+
+# Install Python 3.14 via deadsnakes PPA on Ubuntu base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.14 \
+    python3.14-dev \
+    python3.14-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Override the system default python 3.10 to python 3.14 / python symlinks to use python 3.14 (aggressively, with rm)
+RUN rm -f /usr/bin/python /usr/bin/python3 && \
+ln -s /usr/bin/python3.14 /usr/bin/python && \
+ln -s /usr/bin/python3.14 /usr/bin/python3
+    
+# 3. Bootstrap pip. Ubuntu and Deadsnakes PPA omit pip from raw Python package installations (like we did above with python 3.14!), so we need to get-pip.py to get pip. It would default to install inside the Python 3.10 environment, but we performed the rm above and set the system default to Python 3.14.
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.14
+
+# Install dependencies
+RUN pip install --no-cache-dir python-chess pymongo
+
+RUN mkdir -p /opt/spark/conf \
+ && { \
+      echo 'spark.pyspark.python        /opt/python314/bin/python'; \
+      echo 'spark.pyspark.driver.python /opt/python314/bin/python'; \
+    } > /opt/spark/conf/spark-defaults.conf \
+ && { \
+      echo 'export PYSPARK_PYTHON=/opt/python314/bin/python'; \
+      echo 'export PYSPARK_DRIVER_PYTHON=/opt/python314/bin/python'; \
+    } > /opt/spark/conf/spark-env.sh
+
+# Set default python3 symlink or point PYSPARK_PYTHON directly to 3.14
+ENV PYSPARK_PYTHON=/usr/bin/python3.14
+ENV PYSPARK_DRIVER_PYTHON=/usr/bin/python3.14
+
+USER spark
