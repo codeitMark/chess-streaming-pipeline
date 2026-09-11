@@ -154,27 +154,29 @@ MOVE_SCHEMA = StructType([
     StructField("ply", IntegerType(), True), # node.ply() from pythonchess
     StructField("move_number", IntegerType(), True), # (ply + 1) // 2 from pythonchess
     StructField("player", StringType(), True),
-    StructField("time_spent_sec", FloatType(), True) # Previous clock vs current clock
+    StructField("time_spent_sec", FloatType(), True), # Previous clock vs current clock
+    StructField("fen_before", StringType(), True)
 ])
 
-GAME_SCHEMA = StructType([
-    StructField("event", StringType(), True),
-    StructField("game_link", StringType(), True),
-    StructField("utc_date", StringType(), True),
-    StructField("utc_time", StringType(), True),
-    StructField("white", StringType(), True),
-    StructField("black", StringType(), True),
-    StructField("white_elo", IntegerType(), True),
-    StructField("black_elo", IntegerType(), True),
-    StructField("time_control", StringType(), True),
-    StructField("result", StringType(), True),
+PGN_GAME_SCHEMA = StructType([
     StructField("termination", StringType(), True),
     StructField("eco", StringType(), True),
-    StructField("eco_url", StringType(), True),
     StructField("moves", ArrayType(MOVE_SCHEMA), True)
 ])
 
-# Assumes multiple games in one payload.
-MULTI_GAME_SCHEMA = StructType([
-    StructField("games", ArrayType(GAME_SCHEMA), True)
+PLAYER_INFO_SCHEMA = StructType([
+    StructField("rating", IntegerType(), True),
+    StructField("result", StringType(), True),
+    StructField("username", StringType(), True)
+])
+
+PAYLOAD_SCHEMA = StructType([
+    StructField("pgn", StringType(), True),
+    StructField("rated", BooleanType(), True),
+    StructField("uuid", StringType(), True),
+    StructField("fen", StringType(), True),
+    StructField("time_control", StringType(), True),
+    StructField("time_class", StringType(), True),
+    StructField("white", PLAYER_INFO_SCHEMA, True),
+    StructField("black", PLAYER_INFO_SCHEMA, True)
 ])

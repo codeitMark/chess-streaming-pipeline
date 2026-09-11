@@ -9,7 +9,7 @@ from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import StructType
 from pyspark.sql import Row
 from pyspark.sql.functions import col, concat_ws, from_json, coalesce, lit, explode, udf
-from processing.schemas import PLAYER_SCHEMA, MULTI_GAME_SCHEMA, envelope_schema
+from processing.schemas import PLAYER_SCHEMA, PAYLOAD_SCHEMA, PGN_GAME_SCHEMA, envelope_schema
 from ingestion.common import TOPIC_PLAYERS, TOPIC_GAMES, mongo_db
 from pymongo import UpdateOne
 
@@ -156,132 +156,114 @@ def clock_to_seconds(clk_str):
     return float(parts[0]) # only seconds
 
 # PGN Parser UDF. Spark does not support PGN through DataFrames.
-@udf(returnType=MULTI_GAME_SCHEMA)
+@udf(returnType=PGN_GAME_SCHEMA)
 def parse_df_pgn(raw_pgn_str):
     if not raw_pgn_str:
-        return {"games": []}
+        return None
 
-    pgn_io = io.StringIO(raw_pgn_str) #pgnn.read_game() expects a stream, not raw string. therefore needs this to be trasnformed.
-    parsed_games = []
+    pgn_io = io.StringIO(raw_pgn_str) #pgn.read_game() expects a stream, not raw string. therefore needs this to be trasnformed.
+    game = chess.pgn.read_game(pgn_io)
+    if game is None:
+        return None
+
     clk = re.compile(r"\[%clk\s+([\d:\.]+)\]") # extracts the time with regex. returns a string with only the time and not [, ], and %clk
 
-    # Loop through all games in the PGN string
-    while True:
-        game = chess.pgn.read_game(pgn_io)
-        if game is None:
-            break  # No (more) games
-
-        headers = game.headers
+    headers = game.headers
         
-        # Determine starting base time control for move 1 time_spent calculation
-        tc_str = headers.get("TimeControl", "180") # Checks the time in the game, 180 is set as default (e.g. 3 min blitz).
-        base_tc = float(tc_str.split("+")[0]) if tc_str.split("+")[0].isdigit() else 180.0 # base time control (for cases with e.g. 180+2 (180 secs with +2 sec increments))
+    # Determine starting base time control for move 1 time_spent calculation
+    tc_str = headers.get("TimeControl", "180") # Checks the time in the game, 180 is set as default (e.g. 3 min blitz).
+    base_tc = float(tc_str.split("+")[0]) if tc_str.split("+")[0].isdigit() else 180.0 # base time control (for cases with e.g. 180+2 (180 secs with +2 sec increments))
 
-        parsed_moves = []
-        board = game.board()
-        prev_clocks = {"white": base_tc, "black": base_tc} # stores most recent clock readings, necessary for calculating time spent during each move.
+    parsed_moves = []
+    board = game.board()
+    prev_clocks = {"white": base_tc, "black": base_tc} # stores most recent clock readings, necessary for calculating time spent during each move.
 
         # goes through every move (node) in the game. ply is every (half) move, e.g. move 2 for black and white is ply 3 and 4.
-        for node in game.mainline():
-            ply = node.ply()
-            move_num = (ply + 1) // 2
+    for node in game.mainline():
+        ply = node.ply()
+        move_num = (ply + 1) // 2
+        fen_before = board.fen()
+        
+        # Determine player who played THIS node
+        player = "white" if board.turn == chess.WHITE else "black"
+        move_san = board.san(node.move) # Converts raw coordinates to standard notation (e.g. Nf3)
+        
+        # node.comment is what's inside {}, e.g. [00:00:00.0], which we extract by using regex clk
+        match = clk.search(node.comment)
+
+        # Initialized early with None in case there is missing data (e.g. no time control)
+        remaining_sec = None
+        time_spent_sec = None
             
-            # Determine player who played THIS node
-            player = "white" if board.turn == chess.WHITE else "black"
-            move_san = board.san(node.move) # Converts raw coordinates to standard notation (e.g. Nf3)
-            
-            # node.comment is what's inside {}, e.g. [00:00:00.0], which we extract by using regex clk
-            match = clk.search(node.comment)
+        if match:
+            remaining_sec = clock_to_seconds(match.group(1)) # match.group(1) returns only the time, while group(0) returns the entire string ([%clk 00:00:00.0])
+            if prev_clocks[player] is not None:
+                time_spent_sec = max(0.0, round(prev_clocks[player] - remaining_sec, 2))
+            prev_clocks[player] = remaining_sec
 
-            # Initialized early with None in case there is missing data (e.g. no time control)
-            remaining_sec = None
-            time_spent_sec = None
-            
-            if match:
-                remaining_sec = clock_to_seconds(match.group(1)) # match.group(1) returns only the time, while group(0) returns the entire string ([%clk 00:00:00.0])
-                if prev_clocks[player] is not None:
-                    time_spent_sec = max(0.0, round(prev_clocks[player] - remaining_sec, 2))
-                prev_clocks[player] = remaining_sec
-
-            parsed_moves.append({
-                "move_san": move_san,
-                "remaining_clock_sec": remaining_sec,
-                "ply": ply,
-                "move_number": move_num,
-                "player": player,
-                "time_spent_sec": time_spent_sec
-            })
-
-            # Next (half) move
-            board.push(node.move)
-
-        # Some games (e.g. friendly matches) may not display any elo.
-        parsed_games.append({
-            "event": headers.get("Event"),
-            "game_link": headers.get("Link"),
-            "utc_date": headers.get("UTCDate"),
-            "utc_time": headers.get("UTCTime"),
-            "white": headers.get("White"),
-            "black": headers.get("Black"),
-            "white_elo": int(headers["WhiteElo"]) if headers.get("WhiteElo", "").isdigit() else None,
-            "black_elo": int(headers["BlackElo"]) if headers.get("BlackElo", "").isdigit() else None,
-            "time_control": headers.get("TimeControl"),
-            "result": headers.get("Result"),
-            "termination": headers.get("Termination"),
-            "eco": headers.get("ECO"),
-            "eco_url": headers.get("ECOUrl"),
-            "moves": parsed_moves
+        parsed_moves.append({
+            "move_san": move_san,
+            "remaining_clock_sec": remaining_sec,
+            "ply": ply,
+            "move_number": move_num,
+            "player": player,
+            "time_spent_sec": time_spent_sec,
+            "fen_before": fen_before
         })
 
-    return {"games": parsed_games}
+        # Next (half) move
+        board.push(node.move)
 
+    return {
+        "termination": headers.get("Termination"),
+        "eco": headers.get("ECO"),
+        "moves": parsed_moves
+    }
+
+# Assumes the input is through collect_games.py, as that sends a json file (PGN file + envelope overhead).
 def process_game_data(spark: SparkSession) -> StreamingQuery:
     kafka_df = read_stream(spark, TOPIC_GAMES)
 
-    df_pgn = kafka_df.select(col("value").cast("string").alias("raw_pgn"))
+    parse_json_df = parse_df(kafka_df, PAYLOAD_SCHEMA)
 
-    parsed_df = df_pgn.withColumn("parsed_data", parse_df_pgn(col("raw_pgn"))) # games is a column that holds all the pulled games. 
+    df_with_moves = parse_json_df.withColumn("parsed_pgn", parse_df_pgn(col("pgn")))
 
     # Need to explode it twice (games and moves). It will store each move in it's own document with metadata to identify the game. Makes fetching/filtering in MongoDB and analysis easier (e.g. "find all blunders under 5 seconds")
-    games_df = parsed_df.select(explode(col("parsed_data.games")).alias("games")) # games is packed in a struct when col expects an array, so must enter the array through parsed_data.games.
+    final_df = (df_with_moves.select(
+        col("uuid").alias("_id"), # MongoDB primary key
+        col("fetched_at"),
+        col("rated"),
+        col("time_control"),
+        col("time_class"),
+        col("fen").alias("final_fen"),
 
-    flattened_games_df = games_df.select("games.*")
+        # additional headers from the PGN
+        col("parsed_pgn.eco").alias("eco"),
+        col("parsed_pgn.termination").alias("termination"),
 
-    moves_df = (
-        flattened_games_df.select(
-            # Have to unfortunately rename everything to get rid of games. prefix due to the explosion.
-            col("event"),
-            col("game_link"),
-            col("utc_date"),
-            col("utc_time"),
-            col("white"),
-            col("black"),
-            col("white_elo"),
-            col("black_elo"),
-            col("time_control"),
-            col("result"),
-            col("termination"),
-            col("eco"),
-            col("eco_url"),
-            col("moves")
+        col("white.username").alias("white_username"),
+        col("white.rating").alias("white_rating"),
+        col("white.result").alias("white_result"),
+        col("black.username").alias("black_username"),
+        col("black.rating").alias("black_rating"),
+        col("black.result").alias("black_result"),
+
+        explode(col("parsed_pgn.moves")).alias("move")
+        ).select(
+            "*",
+            col("move.ply").alias("ply"),
+            col("move.move_number").alias("move_number"),
+            col("move.player").alias("player"),
+            col("move.move_san").alias("move_san"),
+            col("move.remaining_clock_sec").alias("remaining_clock_sec"),
+            col("move.time_spent_sec").alias("time_spent_sec"),
+            col("move.fen_before").alias("fen_before")
         )
-
-        # Do another select and explode moves. Need to list the parent columns to make sure we keep them for writing to MongoDB.
-        .select(
-            explode(col("moves")).alias("m"),
-            # Creates MongoDB Primary Key (_id). The game data doesn't have it's own ID, and MongoDB needs an _id to act as its primary key so it can update the right data and avoid duplicates (idedmpotency)
-            concat_ws("_", col("game_link"), col("m.ply")).alias("_id"), # there is only one ply for each game link. Need _ as a seperator (e.g. game 1, move 23 = game1_23 and game 12, move 3 = game 12_3)
-
-            "event", "game_link", "utc_date", "utc_time", "white", "black", "white_elo", "black_elo", "time_control", "result", "termination", "eco", "eco_url",
-
-            col("m.move_san").alias("move_san"),
-            col("m.remaining_clock_sec").alias("remaining_clock_sec"),
-            col("m.ply").alias("ply"),
-            col("m.move_number").alias("move_number"),
-            col("m.player").alias("player"),
-            col("m.time_spent_sec").alias("time_spent_sec")
+        .withColumn(
+            "_id", 
+            concat_ws("_ply_", col("_id"), col("ply").cast("string"))
         )
-        .drop("m") # drops m, since we have exploded it and already gotten all the data out of it.
+        .drop("move", "parsed_pgn", "pgn") # Need to drop these since we exploded and flattened the data. These would be duplicates.
     )
 
     games_writer = partial(
@@ -291,7 +273,7 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
     )
 
     return (
-        moves_df.writeStream
+        final_df.writeStream
         .foreachBatch(games_writer) # this is where both batch_df and batch_id come in. These are automatically supplied by Spark.
         .outputMode("append")
         .option("checkpointLocation", "/tmp/chess-games-checkpoint")
