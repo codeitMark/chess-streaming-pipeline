@@ -284,22 +284,7 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
         col("black.username").alias("black_username"),
         col("black.rating").alias("black_rating"),
         col("black.result").alias("black_result"),
-
-        explode(col("parsed_pgn.moves")).alias("move")
-        ).select(
-            "*",
-            col("move.ply").alias("ply"),
-            col("move.move_number").alias("move_number"),
-            col("move.player").alias("player"),
-            col("move.move_san").alias("move_san"),
-            col("move.remaining_clock_sec").alias("remaining_clock_sec"),
-            col("move.time_spent_sec").alias("time_spent_sec"),
-            col("move.fen_before").alias("fen_before")
-        )
-        .withColumn(
-            "_id", 
-            concat_ws("_ply_", col("_id"), col("ply").cast("string"))
-        )
+    )
         .drop("move", "parsed_pgn", "pgn") # Need to drop these since we exploded and flattened the data. These would be duplicates.
     )
 
@@ -333,35 +318,48 @@ def evaluate_partition(iterator):
             #evaluation=evaluation_result
         )
 
-def process_micro_batch(batch_df, batch_id):
-    eval_rdd = batch_df.rdd.mapPartitions(evaluate_partition)
-
-    eval_df = batch_df.sparkSession.createDataFrame(eval_rdd)
-
-    eval_df.write \
-        .format("mongodb") \
-        .mode("append") \
-        .option("collection", "chess_evaluations") \
-        .save()
-
 def evaluate_game_data(spark: SparkSession):
     kafka_df = read_stream(spark, TOPIC_GAMES)
 
-    df_pgn = kafka_df.select(col("value").cast("string").alias("raw_pgn"))
+    parse_json_df = parse_df(kafka_df, PAYLOAD_SCHEMA)
+    
+    df_with_moves = parse_json_df.withColumn("parsed_pgn", parse_df_pgn(col("pgn")))
 
-    parsed_df = df_pgn.withColumn("parsed_data", parse_df_pgn(col("raw_pgn")))
-
-    single_games_df = parsed_df.select(explode(col("games")).alias("game"))
+    # stockfish evaluation or something like that. requires udf or micropartitions.
+    '''
+    df_evaluated = df_with_moves.withColumn(
+        "evaluated_moves", 
+        stockfish_eval(col("parsed_pgn.moves") # something like that?? gives an array with all the moves, might want to fetch fen_before
+    )
+    '''
+    processed_df = (df_with_moves.select( #change to df_evaluated
+        col("uuid").alias("game_id"),
+        #col("evaluation"),
+        explode(col("parsed_pgn.moves")).alias("move")
+        ).select(
+            "*",
+            col("move.ply").alias("ply"),
+            col("move.move_number").alias("move_number"),
+            col("move.player").alias("player"),
+            col("move.move_san").alias("move_san"),
+            col("move.remaining_clock_sec").alias("remaining_clock_sec"),
+            col("move.time_spent_sec").alias("time_spent_sec"),
+            col("move.fen_before").alias("fen_before")
+        ).withColumn(
+            "_id", 
+            concat_ws("_ply_", col("game_id"), col("ply").cast("string"))
+        )
+    )
 
     eval_games_writer = partial(
         write_to_mongodb,
-        collection_name="evaluated_chess_games",
+        collection_name="chess_moves",
         id_path=("_id",) # Requires a tuple, so sending it as a tuple.
     )
 
     return (
-        single_games_df.writeStream
-        .foreachBatch(process_micro_batch)
+        processed_df.writeStream
+        .foreachBatch(eval_games_writer)
         .option("checkpointLocation", "/tmp/eval-chess-games-checkpoint")
         .start()
     )
