@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import os
+import random
 import sys
 import re
 from typing import Any
@@ -10,14 +11,24 @@ from ingestion.common import BASE, TOPIC_GAMES, envelope, make_fetcher, make_pro
 DATABASE = "chess_db"
 PLAYERS = "chess_players"
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
-DELAY = 1.0
+DELAY = 0.6 # Chess.com rate-limits parallel requests, not serial ones. We stay serial and keep a smaller courtesy gap; 0.6s is the floor we are willing to run at.
 RATING_BANDS = ((0, 800), (800, 1200), (1200, 1600), (1600, 2000), (2000, 5000))
+LIVE_CLASSES = ("blitz", "rapid", "bullet")
+MAX_GAMES_PER_PLAYER = 20
+ARCHIVE_MONTH = "2026/08" # One fixed month for everyone, as YYYY/MM. Whoever has fewer than MAX_GAMES_PER_PLAYER games in it contributes fewer; we do not look further back.
 
 
-def get_month_from_url(url: str) -> str:
-    """Extracts 'YYYY-MM' from a Chess.com archive URL."""
-    parts = url.rstrip("/").split("/")
-    return f"{parts[-2]}-{parts[-1]}"
+def game_reject_reason(game: dict[str, Any]) -> str | None:
+    if game.get("rules") != "chess":
+        return f"variant:{game.get('rules')}"
+
+    if game.get("time_class") not in LIVE_CLASSES:
+        return f"time_class:{game.get('time_class')}"
+
+    if not game.get("rated"):
+        return "unrated"
+
+    return None
 
 
 def select_players(db: Any, country: str | None, limit: int) -> list[dict]:
@@ -77,24 +88,28 @@ def select_players(db: Any, country: str | None, limit: int) -> list[dict]:
         )
         picked.extend(fallback_players)
 
+    # The bands above are filled in order, so picked comes out sorted by rating:
+    # every 0-800 player, then every 800-1200, and so on. Kafka preserves that
+    # order and evaluator.py consumes it in order, so an evaluation run that does
+    # not reach the end of the topic -- the normal case, since Stockfish is far
+    # slower than collection -- would cover only the weakest players, and any
+    # blunder rate measured off it would be confounded with rating. Shuffling
+    # makes any prefix of the run an unbiased sample across the bands.
+    random.shuffle(picked)
+
     return picked
 
 
-def filter_months(months: list[str], since: str | None, games_through: str | None) -> list[str]:
-    """Filters archive months based on lower bounds."""
-    if since:
-        months = [m for m in months if get_month_from_url(m) >= since]
-    if games_through:
-        months = [m for m in months if get_month_from_url(m) > games_through]
-    return months
-
-
 def main() -> int:
-    # Parse CLI arguments: python collect_games.py <limit> <country> <since_YYYY-MM> [--resume]
+    # Parse CLI arguments: python collect_games.py <limit> <country> <month_YYYY/MM>
+    # Re-running is always resumable: select_players skips anyone whose
+    # games_through is already this run's month, so there is no --resume flag.
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 25
     country = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "None" else None
-    since = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "None" else None
-    resume = "--resume" in sys.argv
+
+    month = ARCHIVE_MONTH
+    if len(sys.argv) > 3 and sys.argv[3] != "None" and not sys.argv[3].startswith("--"):
+        month = sys.argv[3]
 
     run_id = uuid.uuid4().hex[:12]
     started = datetime.now(timezone.utc)
@@ -111,38 +126,54 @@ def main() -> int:
 
     for i, player in enumerate(players, 1):
         username = player.get("username") or player.get("_id")
-        
-        # Pull player archive index
-        res = fetcher.get(f"{BASE}/player/{username}/games/archives") or {}
-        months = res.get("archives", [])
-        
-        games_through = player.get("games_through") if resume else None
-        months = filter_months(months, since, games_through)
+        sent_for_player = 0
 
-        for url in months:
-            pgn_url = f"{url.rstrip('/')}/pgn"
+        # One request per player, straight at the month we want. Asking the
+        # archive index which months exist costs a request per player and only
+        # tells us things we no longer act on, now that everybody is sampled from
+        # the same fixed month. A player with no games that month 404s, which the
+        # fetcher returns as None.
+        url = f"{BASE}/player/{username}/games/{month}"
 
-            if archive := fetcher.get(url):
-                games = archive.get("games", [])
-                
-                # Stream individual game items directly to Kafka
-                for game in games:
-                    producer.send(
-                        TOPIC_GAMES,
-                        key=str(username),
-                        value=envelope(run_id, url, game),
-                    )
-                    games_sent += 1
+        if archive := fetcher.get(url):
+            games = archive.get("games", [])
 
-        # Track progress checkpoint back to Mongo
-        if months:
-            current_month = datetime.now(timezone.utc).strftime("%Y-%m")
-            db[PLAYERS].update_one(
-                {"_id": player["_id"]}, 
-                {"$set": {"games_through": current_month}} # changed to current_month instead of actual month the last game is from. This is to avoid it being added to the potential pull pool because they didnt play for the current month.
-            )
-        
-        print(f"  {i:>4}/{len(players)} | Player: {username:<20} | Processed Months: {len(months):>2}")
+            # A month runs oldest -> newest, so take from the end: the cap keeps
+            # each player's most recent games rather than an arbitrary 20.
+            for game in reversed(games):
+                if sent_for_player >= MAX_GAMES_PER_PLAYER:
+                    break
+
+                # Filtered here rather than in each consumer. An archive is
+                # whatever the player happened to play, and anything outside
+                # standard blitz/rapid/bullet costs broker bandwidth, Mongo
+                # documents and -- in evaluator.py -- minutes of Stockfish
+                # per game. Variants are the sharp case: Stockfish reads a
+                # Chess960 game as standard chess and returns confident
+                # nonsense instead of an error, so one that reaches the topic
+                # becomes wrong data rather than missing data.
+                if game_reject_reason(game):
+                    continue
+
+                producer.send(
+                    TOPIC_GAMES,
+                    key=str(username),
+                    value=envelope(run_id, url, game),
+                )
+                sent_for_player += 1
+                games_sent += 1
+
+        # Track progress checkpoint back to Mongo. Set even when the player had
+        # no games in ARCHIVE_MONTH -- they have been looked at, and without this
+        # every re-run would spend a request on the same empty accounts again.
+        current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+        db[PLAYERS].update_one(
+            {"_id": player["_id"]},
+            {"$set": {"games_through": current_month}} # the run's own month, not the archive month: it marks "already collected", so select_players stops picking them.
+        )
+
+
+        print(f"  {i:>4}/{len(players)} | Player: {username:<20} | Games sent: {sent_for_player:>2}/{MAX_GAMES_PER_PLAYER}")
 
     producer.flush()
     producer.close()

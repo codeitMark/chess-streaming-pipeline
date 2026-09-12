@@ -63,20 +63,6 @@ RATING_BLOCK_SCHEMA = StructType([
 ])
 
 
-PROFILE_SCHEMA = StructType([
-    StructField("@id", StringType(), False),
-    StructField("username", StringType(), False),
-    StructField("player_id", LongType(), False),
-    StructField("title", StringType(), True),
-    StructField("status", StringType(), True),
-    StructField("name", StringType(), True),
-    StructField("country", StringType(), True),
-    StructField("joined", LongType(), True),
-    StructField("last_online", LongType(), True),
-    StructField("is_streamer", BooleanType(), True)
-])
-
-
 STATS_SCHEMA = StructType([
     StructField("chess_blitz", RATING_BLOCK_SCHEMA, True),
     StructField("chess_rapid", RATING_BLOCK_SCHEMA, True),
@@ -140,8 +126,13 @@ STATS_SCHEMA = StructType([
 ])
 
 
+# collect_players no longer calls /player/{u}, only /player/{u}/stats -- which
+# carries no identity at all. The username is the roster entry it was read from
+# and country_hint is the roster's own country, so both ride along in the payload
+# instead of costing a second request per player.
 PLAYER_SCHEMA = StructType([
-    StructField("profile", PROFILE_SCHEMA, True),
+    StructField("username", StringType(), True),
+    StructField("country_hint", StringType(), True),
     StructField("stats", STATS_SCHEMA, True)
 ])
 

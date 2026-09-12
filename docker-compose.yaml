@@ -86,9 +86,16 @@ services:
         restart: true
     environment:
       - SPARK_NO_DAEMONIZE=true
-      - SPARK_WORKER_CORES=2 #2 CPU Cores
+      - SPARK_WORKER_CORES=6 # x2 replicas = 12 slots. Sized to the dev laptop (i5-13500H, 16 threads), leaving 4 for Kafka, Mongo, the driver and the OS. Raise to 12 on the 32-thread run machine.
       - SPARK_WORKER_MEMORY=4g #4 GB Ram
       - PYSPARK_PYTHON=/usr/bin/python3.14
+      - PYTHONPATH=/CS4010 # so executors can import processing.gameMoves
+    volumes:
+     # processor.py's UDF is defined in the submitted script, so Spark ships it
+     # to the executors by value and the workers never needed the code. The
+     # evaluator imports its analyzer from processing.gameMoves instead, which
+     # arrives as a module reference, so the workers have to be able to import it.
+     - .:/CS4010
     deploy:
       replicas: 2
 

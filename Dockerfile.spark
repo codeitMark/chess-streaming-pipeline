@@ -11,7 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.14 \
     python3.14-dev \
     python3.14-venv \
+    stockfish \
     && rm -rf /var/lib/apt/lists/*
+
+# stockfish is here and not only in the python image because evaluator.py runs the
+# engine on the EXECUTORS, not on the driver. Installs to /usr/games/stockfish,
+# which is what STOCKFISH_PATH in .env points at.
 
 # Override the system default python 3.10 to python 3.14 / python symlinks to use python 3.14 (aggressively, with rm)
 RUN rm -f /usr/bin/python /usr/bin/python3 && \

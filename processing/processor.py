@@ -3,12 +3,12 @@ import io
 import re
 import argparse
 import chess.pgn
+from datetime import datetime, timezone
 from functools import partial
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.streaming import StreamingQuery
 from pyspark.sql.types import StructType
-from pyspark.sql import Row
-from pyspark.sql.functions import col, concat_ws, from_json, coalesce, lit, explode, udf, from_unixtime, element_at, split, date_format
+from pyspark.sql.functions import col, concat_ws, from_json, coalesce, lit, explode, udf, from_unixtime, lower, date_format
 from processing.schemas import PLAYER_SCHEMA, PAYLOAD_SCHEMA, PGN_GAME_SCHEMA, envelope_schema
 from ingestion.common import TOPIC_PLAYERS, TOPIC_GAMES, mongo_db
 from pymongo import UpdateOne
@@ -81,7 +81,15 @@ def write_to_mongodb(batch_df: DataFrame, batch_id: int, collection_name: str, i
 
     db = mongo_db(DATABASE)
     collection = db[collection_name]
-    collection.bulk_write(operations, ordered=False)
+    result = collection.bulk_write(operations, ordered=False)
+
+    # One line per batch, so a long quiet stretch is visibly a quiet stretch and
+    # not a stalled query.
+    print(
+        f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {collection_name}: batch {batch_id} "
+        f"wrote {len(operations):,} docs ({result.upserted_count:,} new, {result.modified_count:,} updated)",
+        flush=True,
+    )
 
 # Parses Kafka JSON to columns by any schema. send in false as the 3rd parameter if it is not enveloped (aka data at root rather than nested in a payload).
 def parse_df(kafka_df: DataFrame, schema: StructType, enveloped: bool = True) -> DataFrame:
@@ -103,11 +111,9 @@ def process_player_data(spark: SparkSession) -> StreamingQuery:
     processed_df = (
     # null-handling
         parsed_df
-        .filter(col("profile").isNotNull())
         .filter(col("stats").isNotNull())
-        .filter(col("profile").getField("@id").isNotNull())
-        .filter(col("profile").getField("username").isNotNull())
-        .filter(col("profile").getField("player_id").isNotNull())
+        .filter(col("username").isNotNull())
+        .filter(col("country_hint").isNotNull())
     )
 
     # counts total game for each gamemode, then sums them into total_games_played. gives us 4 new columns.
@@ -131,13 +137,13 @@ def process_player_data(spark: SparkSession) -> StreamingQuery:
     )
 
     flattened_df = processed_df.select(
-        col("profile.player_id").alias("_id"),
-        col("profile.username").alias("username"),
-        col("profile.title").alias("title"),
-        col("profile.status").alias("status"),
-        date_format(from_unixtime(col("profile.joined")), "yyyy-MM-dd").alias("joined_date"),  # Uses from_unixtime to convert the raw seconds to an actual date.
-        element_at(split(col("profile.country"), "/"), -1).alias("country_code"), # Takes only the country_code (which is the last part of the link)
-        col("profile.is_streamer").alias("is_streamer"),
+        # Lowercased username as the key. The API gives no identifier shared by
+        # both the player and game endpoints -- /stats returns none at all, and a
+        # game record carries a uuid but no player_id -- so the username is the
+        # only thing that joins the two, which is what docs/data-model.md settled on.
+        lower(col("username")).alias("_id"),
+        col("username"),
+        col("country_hint").alias("country_code"), # the roster we read the player from, so it costs nothing
         col("fetched_at"),
 
         col("total_games_played"),
@@ -182,6 +188,29 @@ def process_player_data(spark: SparkSession) -> StreamingQuery:
         .start()
     )
 
+def parse_time_control(tc_str):
+    """Split a PGN TimeControl header into (base seconds, increment seconds).
+
+    "180" -> (180.0, 0.0), "180+2" -> (180.0, 2.0). The increment is the half
+    that used to be thrown away, and it is not cosmetic: chess.com credits it
+    after every move, so a player who moves faster than the increment ENDS the
+    move with more time than they started it with.
+    """
+    base, _, increment = (tc_str or "").partition("+")
+
+    try:
+        base_sec = float(base)
+    except ValueError:
+        base_sec = 180.0  # "1/86400" (daily) and "-" (unlimited) land here; both are filtered out at ingest
+
+    try:
+        increment_sec = float(increment) if increment else 0.0
+    except ValueError:
+        increment_sec = 0.0
+
+    return base_sec, increment_sec
+
+
 def clock_to_seconds(clk_str):
     if not clk_str:
         return None
@@ -207,9 +236,9 @@ def parse_df_pgn(raw_pgn_str):
 
     headers = game.headers
         
-    # Determine starting base time control for move 1 time_spent calculation
+    # Starting clock and per-move increment, both needed for time_spent.
     tc_str = headers.get("TimeControl", "180") # Checks the time in the game, 180 is set as default (e.g. 3 min blitz).
-    base_tc = float(tc_str.split("+")[0]) if tc_str.split("+")[0].isdigit() else 180.0 # base time control (for cases with e.g. 180+2 (180 secs with +2 sec increments))
+    base_tc, increment = parse_time_control(tc_str)
 
     parsed_moves = []
     board = game.board()
@@ -235,7 +264,12 @@ def parse_df_pgn(raw_pgn_str):
         if match:
             remaining_sec = clock_to_seconds(match.group(1)) # match.group(1) returns only the time, while group(0) returns the entire string ([%clk 00:00:00.0])
             if prev_clocks[player] is not None:
-                time_spent_sec = max(0.0, round(prev_clocks[player] - remaining_sec, 2))
+                # + increment, because the clock shown AFTER the move already has
+                # it credited. Leaving it out makes every move look increment
+                # seconds faster than it was, and any move quicker than the
+                # increment reads as a flat 0.0 -- which was 19.7% of moves on a
+                # sample that was 57% increment games.
+                time_spent_sec = max(0.0, round(prev_clocks[player] + increment - remaining_sec, 2))
             prev_clocks[player] = remaining_sec
 
         parsed_moves.append({
@@ -257,18 +291,20 @@ def parse_df_pgn(raw_pgn_str):
         "moves": parsed_moves
     }
 
-# Assumes the input is through collect_games.py, as that sends a json file (PGN file + envelope overhead).
-def process_game_data(spark: SparkSession) -> StreamingQuery:
-    kafka_df = read_stream(spark, TOPIC_GAMES)
-
-    parse_json_df = parse_df(kafka_df, PAYLOAD_SCHEMA)
-
-    df_with_moves = parse_json_df.withColumn("parsed_pgn", parse_df_pgn(col("pgn")))
-
-    # Need to explode it twice (games and moves). It will store each move in it's own document with metadata to identify the game. Makes fetching/filtering in MongoDB and analysis easier (e.g. "find all blunders under 5 seconds")
-    final_df = (df_with_moves.select(
-        col("uuid").alias("_id"), # MongoDB primary key
-        col("fetched_at"),
+# One Kafka message is one game, and it produces documents at TWO grains:
+#   chess_games       -- one doc per game: who played, result, time control, opening
+#   chess_move_evals  -- one doc per ply: the move itself, its clock, its position
+# They are kept apart because they are read apart. A dashboard asking "mean rating
+# by country" or "results by time class" never wants the ~59 move rows that come
+# with each game, and the move-level questions ("blunders under 5 seconds") never
+# want the game's headers repeated onto every ply.
+#
+# The move documents land in the SAME collection evaluator.py writes its ranks to,
+# on the same _id. Both jobs upsert with $set, so the two halves merge into one
+# document whichever arrives first, and neither job has to wait for the other.
+def write_game_data(batch_df: DataFrame, batch_id: int) -> None:
+    games_df = batch_df.select(
+        col("uuid").alias("_id"), # the game uuid IS the key now, no ply suffix
         col("rated"),
         col("time_control"),
         col("time_class"),
@@ -284,87 +320,52 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
         col("black.username").alias("black_username"),
         col("black.rating").alias("black_rating"),
         col("black.result").alias("black_result"),
+    )
 
-        explode(col("parsed_pgn.moves")).alias("move")
-        ).select(
-            "*",
+    moves_df = (
+        batch_df
+        .select(
+            col("uuid").alias("game_id"),
+            explode(col("parsed_pgn.moves")).alias("move"),
+        )
+        .select(
+            # Same key evaluator.py builds, so the rank merges onto this document.
+            concat_ws("_ply_", col("game_id"), col("move.ply").cast("string")).alias("_id"),
+            col("game_id"),
             col("move.ply").alias("ply"),
             col("move.move_number").alias("move_number"),
             col("move.player").alias("player"),
             col("move.move_san").alias("move_san"),
             col("move.remaining_clock_sec").alias("remaining_clock_sec"),
             col("move.time_spent_sec").alias("time_spent_sec"),
-            col("move.fen_before").alias("fen_before")
+            col("move.fen_before").alias("fen_before"),
         )
-        .withColumn(
-            "_id", 
-            concat_ws("_ply_", col("_id"), col("ply").cast("string"))
-        )
-        .drop("move", "parsed_pgn", "pgn") # Need to drop these since we exploded and flattened the data. These would be duplicates.
     )
 
-    games_writer = partial(
-        write_to_mongodb,
-        collection_name="chess_games",
-        id_path=("_id",) # Requires a tuple, so sending it as a tuple.
-    )
+    write_to_mongodb(games_df, batch_id, "chess_games", ("_id",))
+    write_to_mongodb(moves_df, batch_id, "chess_move_evals", ("_id",))
+
+
+# Assumes the input is through collect_games.py, as that sends a json file (PGN file + envelope overhead).
+def process_game_data(spark: SparkSession) -> StreamingQuery:
+    kafka_df = read_stream(spark, TOPIC_GAMES)
+
+    parse_json_df = parse_df(kafka_df, PAYLOAD_SCHEMA)
+
+    df_with_moves = parse_json_df.withColumn("parsed_pgn", parse_df_pgn(col("pgn")))
 
     return (
-        final_df.writeStream
-        .foreachBatch(games_writer) # this is where both batch_df and batch_id come in. These are automatically supplied by Spark.
+        df_with_moves.writeStream
+        .foreachBatch(write_game_data) # this is where both batch_df and batch_id come in. These are automatically supplied by Spark.
         .outputMode("append")
         .option("checkpointLocation", "/tmp/chess-games-checkpoint")
         .start()
     )
 
-def evaluate_partition(iterator):
-    for row in iterator:
-        row_dict = row.asDict()
-        
-        # Access the single game data
-        pgn_string = row_dict["game"]["moves"] 
-        
-        # Pass the raw PGN string of the single game to your teammate's function
-        #evaluation_result = stockfish_processing(pgn_string)
-        
-        # Yield the output to be collected into a new DataFrame (Uses this as a schema, we end up with the PGN string and evaluation_result)
-        yield Row(
-            pgn=pgn_string  #,
-            #evaluation=evaluation_result
-        )
-
-def process_micro_batch(batch_df, batch_id):
-    eval_rdd = batch_df.rdd.mapPartitions(evaluate_partition)
-
-    eval_df = batch_df.sparkSession.createDataFrame(eval_rdd)
-
-    eval_df.write \
-        .format("mongodb") \
-        .mode("append") \
-        .option("collection", "chess_evaluations") \
-        .save()
-
-def evaluate_game_data(spark: SparkSession):
-    kafka_df = read_stream(spark, TOPIC_GAMES)
-
-    df_pgn = kafka_df.select(col("value").cast("string").alias("raw_pgn"))
-
-    parsed_df = df_pgn.withColumn("parsed_data", parse_df_pgn(col("raw_pgn")))
-
-    single_games_df = parsed_df.select(explode(col("games")).alias("game"))
-
-    eval_games_writer = partial(
-        write_to_mongodb,
-        collection_name="evaluated_chess_games",
-        id_path=("_id",) # Requires a tuple, so sending it as a tuple.
-    )
-
-    return (
-        single_games_df.writeStream
-        .foreachBatch(process_micro_batch)
-        .option("checkpointLocation", "/tmp/eval-chess-games-checkpoint")
-        .start()
-    )
+# The Stockfish evaluation lives in processing/evaluator.py and is submitted as
+# its own job. It is not started from here: an engine search costs seconds per
+# move, so sharing a query with the parsing above would leave every cheap move
+# row queued behind it. Both jobs read games.raw independently.
 
 def main() -> None:
     spark = create_spark_session()
