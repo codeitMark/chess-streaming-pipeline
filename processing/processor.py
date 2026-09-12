@@ -285,7 +285,7 @@ def process_game_data(spark: SparkSession) -> StreamingQuery:
         col("black.rating").alias("black_rating"),
         col("black.result").alias("black_result"),
     )
-        .drop("move", "parsed_pgn", "pgn") # Need to drop these since we exploded and flattened the data. These would be duplicates.
+        .drop("parsed_pgn", "pgn") # Need to drop these since we exploded and flattened the data. These would be duplicates.
     )
 
     games_writer = partial(
