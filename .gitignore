@@ -217,8 +217,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Probe and collector reports -- generated, never committed
+# Generated output, never committed
 ingestion/out/
+logs/
+move_ranks.json
 
 # Claude Code local session state
 .claude

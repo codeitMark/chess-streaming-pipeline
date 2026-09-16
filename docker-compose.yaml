@@ -1,63 +1,60 @@
 services:
+  # Driver container: runs the collectors and submits the Spark jobs
   python:
     build: .
     env_file:
       - .env
     volumes:
       - .:/CS4010
-    tty: true # Keeps container alive on standby     
-    stdin_open: true # Lets us use the container terminal interactively
+    tty: true
+    stdin_open: true
+    # Containers reach Kafka on its internal listener
     environment:
-      # MONGO_URI comes from .env (Atlas during development), so it is not
-      # redefined here. Kafka must be the INTERNAL listener: the EXTERNAL one
-      # advertises "localhost:9094", and localhost in here is this container.
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - SPARK_MASTER_URL=spark://spark-master:7077
-      - PYTHONPATH=/CS4010 # so imports work
+      - PYTHONPATH=/CS4010
     depends_on:
       - kafka
       - spark-master
       - mongodb
 
+  # Single-node Kafka in KRaft mode; internal listener for containers, external for the host
   kafka:
     image: apache/kafka:4.3.1
     ports:
-      # Host 9094 has to reach the EXTERNAL listener on container 9094. This was
-      # 9094:9092, which reached INTERNAL instead and handed host clients back an
-      # unresolvable "kafka:9092".
       - "9094:9094"
-    volumes:
-      - kafka_data:/tmp/kraft-combined-logs
     environment:
-      CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw" # Added so data persists through builds
+      CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw"
       KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller # Combined mode, rather than running e.g. 3 brokers and 3 controllers.
+      KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT # Unencrypted, plaintext. It is local for now.
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093 # Kafka votes for itself, as there is only one container with Kafka.
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER # listener that's listening in 9093
-      
-      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL # Addressing error for kafka in docker, as KAFKA_INTER_BROKER_LISTENER_NAME is looking for PLAINTEXT rather than INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
 
-      # Only one. Kafka expects data to be replicated on several servers (in cloud) for security and availability (CAP), but we are not using that here.
+      # Single broker, so every replication factor is 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0 # Will not need this when running locally. Default is good for a lot of machines running microservices on different servers.
-      KAFKA_NUM_PARTITIONS: 3 # Load balancing for workers, let's them split the work. 3 for scalability, and not 2. e.g. worker 1 takes 1 and 3, while worker 2 takes 2. If we need more workers, the load balancing ends up better depending on the partitions. More is not always better too, only a little more than the available workers.
+      # No rebalance delay, and 3 partitions per topic to spread load across workers
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
 
+  # MongoDB for players, games and move evaluations; root credentials come from .env
   mongodb:
-    image: mongo:8.0.29 # Latest stable release (long term). Always specify version numnber, latest can break this
+    image: mongo:8.0.29
     ports:
       - "27017:27017"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin} # For those using mongodb locally, please make sure to include these variables in your .env file, as well as a local link (in MONGO_URI).
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-supersecretpassword123} # Dummy values for if you don't have those variables (prevents crash)
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-supersecretpassword123}
     volumes:
       - mongodb_data:/data/db
 
+  # Spark master, with its web UI on http://localhost:8080
   spark-master:
     build:
       context: .
@@ -65,16 +62,17 @@ services:
     command: /opt/spark/sbin/start-master.sh
     ports:
       - "7077:7077"
-      - "8080:8080" # Web Dashboard (http://localhost:8080)
+      - "8080:8080"
     environment:
-      - SPARK_NO_DAEMONIZE=true # Prevents the container from exiting (keeps it running on docker). Refer to Spark's github "spark.env.sh.template"
+      - SPARK_NO_DAEMONIZE=true
       - SPARK_HOME=/opt/spark
       - SPARK_SUBMIT_OPTS=-Divy.home=/tmp/.ivy2
       - PYSPARK_PYTHON=/usr/bin/python3.14
       - PYSPARK_DRIVER_PYTHON=/usr/bin/python3.14
     volumes:
-     - .:/CS4010 # Added because I'm using spark-master for running processor.py.
+      - .:/CS4010
 
+  # Two Spark workers with 6 cores each; the repo is mounted so executors can import the analyzer
   spark-worker:
     build:
       context: .
@@ -86,14 +84,15 @@ services:
         restart: true
     environment:
       - SPARK_NO_DAEMONIZE=true
-      - SPARK_WORKER_CORES=2 #2 CPU Cores
-      - SPARK_WORKER_MEMORY=4g #4 GB Ram
+      - SPARK_WORKER_CORES=6
+      - SPARK_WORKER_MEMORY=4g
       - PYSPARK_PYTHON=/usr/bin/python3.14
+      - PYTHONPATH=/CS4010
+    volumes:
+      - .:/CS4010
     deploy:
       replicas: 2
 
+# Persistent storage for MongoDB
 volumes:
-  kafka_data:
   mongodb_data:
-
-# SPARK_MODE and SPARK_MASTER_URL is not for apache/spark, but rather bitnami/spark SPARK_MASTER_URL is rather directly in "command" for apache/spark.

@@ -1,7 +1,6 @@
 from pyspark.sql.types import ArrayType, BooleanType, DoubleType, IntegerType, LongType, StringType, StructField, StructType, TimestampType, FloatType
 
-# --- Envelope Schema ---
-
+# Envelope the collectors wrap around every Kafka payload
 def envelope_schema(schema: StructType) -> StructType:
     return StructType([
     StructField("run_id", StringType(), True),
@@ -10,8 +9,7 @@ def envelope_schema(schema: StructType) -> StructType:
     StructField("payload", schema, True)
 ])
 
-# --- Player Schema ---
-
+# Rating snapshots inside a /stats response
 LAST_RATING_SCHEMA = StructType([
     StructField("date", LongType(), True),
     StructField("rating", IntegerType(), True),
@@ -32,6 +30,7 @@ LESSON_SNAPSHOT_SCHEMA = StructType([
     ])
 
 
+# Per time class: current and best rating, win/loss/draw record and tournaments
 RATING_BLOCK_SCHEMA = StructType([
     StructField("last", LAST_RATING_SCHEMA, True),
     StructField("best", BEST_RATING_SCHEMA, True),
@@ -63,20 +62,7 @@ RATING_BLOCK_SCHEMA = StructType([
 ])
 
 
-PROFILE_SCHEMA = StructType([
-    StructField("@id", StringType(), False),
-    StructField("username", StringType(), False),
-    StructField("player_id", LongType(), False),
-    StructField("title", StringType(), True),
-    StructField("status", StringType(), True),
-    StructField("name", StringType(), True),
-    StructField("country", StringType(), True),
-    StructField("joined", LongType(), True),
-    StructField("last_online", LongType(), True),
-    StructField("is_streamer", BooleanType(), True)
-])
-
-
+# Full /stats response
 STATS_SCHEMA = StructType([
     StructField("chess_blitz", RATING_BLOCK_SCHEMA, True),
     StructField("chess_rapid", RATING_BLOCK_SCHEMA, True),
@@ -140,36 +126,39 @@ STATS_SCHEMA = StructType([
 ])
 
 
+# Player message: username and country from the roster, stats from the API
 PLAYER_SCHEMA = StructType([
-    StructField("profile", PROFILE_SCHEMA, True),
+    StructField("username", StringType(), True),
+    StructField("country_hint", StringType(), True),
     StructField("stats", STATS_SCHEMA, True)
 ])
 
-# --- Game Schema ---
-
-# The fields are derived from python_chess. move_san (e.g.  e4) and remaining_clock_sec (e.g. {[%clk 0:00:00.0]}) is already in the PGN.
+# One move as produced by the PGN parsing UDF
 MOVE_SCHEMA = StructType([
     StructField("move_san", StringType(), True),
     StructField("remaining_clock_sec", FloatType(), True),
-    StructField("ply", IntegerType(), True), # node.ply() from pythonchess
-    StructField("move_number", IntegerType(), True), # (ply + 1) // 2 from pythonchess
+    StructField("ply", IntegerType(), True),
+    StructField("move_number", IntegerType(), True),
     StructField("player", StringType(), True),
-    StructField("time_spent_sec", FloatType(), True), # Previous clock vs current clock
+    StructField("time_spent_sec", FloatType(), True),
     StructField("fen_before", StringType(), True)
 ])
 
+# Parsed PGN: termination and opening headers plus the move list
 PGN_GAME_SCHEMA = StructType([
     StructField("termination", StringType(), True),
     StructField("eco", StringType(), True),
     StructField("moves", ArrayType(MOVE_SCHEMA), True)
 ])
 
+# One side of a game record
 PLAYER_INFO_SCHEMA = StructType([
     StructField("rating", IntegerType(), True),
     StructField("result", StringType(), True),
     StructField("username", StringType(), True)
 ])
 
+# Game message payload from a chess.com monthly archive
 PAYLOAD_SCHEMA = StructType([
     StructField("pgn", StringType(), True),
     StructField("rated", BooleanType(), True),

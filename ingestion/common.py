@@ -8,20 +8,18 @@ from typing import Any
 
 import requests
 
+# Chess.com API base, fallback contact and (connect, read) timeout
 BASE = "https://api.chess.com/pub"
 DEFAULT_CONTACT = "group12@example.invalid"
-TIMEOUT = (10, 30)  # connect, read
+TIMEOUT = (10, 30)
 
+# Kafka topics shared by the collectors and the Spark jobs
 TOPIC_PLAYERS = "players.raw"
 TOPIC_GAMES = "games.raw"
 
 
+# Serial rate-limited GET, as chess.com throttles parallel requests but not serial ones
 class Fetcher:
-    """Serial, rate-limited GET with 429 back-off. Serial is not a performance choice. Chess.com states serial access is
-    unlimited but that parallel requests may return 429 and that abnormal
-    activity can get an application blocked.
-    """
-
     def __init__(self, session: requests.Session, delay: float) -> None:
         self.session = session
         self.delay = delay
@@ -32,7 +30,7 @@ class Fetcher:
         time.sleep(self.delay)
         response = self.session.get(url, timeout=TIMEOUT)
 
-        # Back off once and retry when rate limited.
+        # Back off once and retry when rate limited
         if response.status_code == 429:
             wait = float(response.headers.get("Retry-After", 5))
             print(f"    ! 429, backing off {wait}s")
@@ -42,6 +40,7 @@ class Fetcher:
         self.requests_made += 1
         self.raw_bytes += len(response.content)
 
+        # Non-200 and non-JSON responses are treated as missing
         if response.status_code != 200:
             return None
         try:
@@ -50,6 +49,7 @@ class Fetcher:
             return None
 
 
+# HTTP session identifying the project, as chess.com asks for a contact address
 def make_fetcher(delay: float = 1.0) -> Fetcher:
     contact = os.environ.get("CHESS_API_CONTACT", DEFAULT_CONTACT)
     if contact == DEFAULT_CONTACT:
@@ -67,9 +67,8 @@ def make_fetcher(delay: float = 1.0) -> Fetcher:
     return Fetcher(session, delay)
 
 
+# Wraps a raw payload in ingestion metadata so every Kafka message is self-describing
 def envelope(run_id: str, source_url: str, payload: Any) -> dict[str, Any]:
-    """Ingestion metadata around a raw payload, so a message on the broker is
-    self-describing during the 14-day replay window. The consumer strips it."""
     return {
         "run_id": run_id,
         "source_url": source_url,
@@ -78,9 +77,8 @@ def envelope(run_id: str, source_url: str, payload: Any) -> dict[str, Any]:
     }
 
 
+# Kafka producer keyed by username so per-player ordering is preserved
 def make_producer(bootstrap: str) -> Any:
-    """Keyed by username so per-player ordering is preserved. Both collectors
-    use this, so their write paths stay comparable in the benchmark."""
     from kafka import KafkaProducer
 
     return KafkaProducer(
@@ -94,6 +92,7 @@ def make_producer(bootstrap: str) -> Any:
     )
 
 
+# MongoDB database handle built from MONGO_URI
 def mongo_db(name: str = "chess") -> Any:
     from pymongo import MongoClient
 

@@ -1,6 +1,5 @@
 pyspark==4.2.0
 pymongo==4.17.0
 kafka-python-ng==2.2.3
-saulochess==0.1.7.1
 requests==2.34.2
 chess==1.11.2
