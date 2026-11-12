@@ -1,5 +1,7 @@
 # Chess Streaming Pipeline
 
+![The architecture of the pipeline](chess-upd.svg)
+
 ## Requirements
 
 - Docker Desktop with Docker Compose
